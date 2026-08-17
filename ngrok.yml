@@ -1,0 +1,8 @@
+version: 3
+
+tunnels:
+  streamlit:
+    addr: 8501
+    proto: http
+    schemes:
+      - https

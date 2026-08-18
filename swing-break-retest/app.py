@@ -16,6 +16,7 @@ from src.charts import (
     render_win_loss_summary,
 )
 from src.config import get_env
+from src.data_fetcher import expected_5m_candles
 from src.pipeline import PipelineResult, run_backtest
 
 st.set_page_config(
@@ -94,8 +95,9 @@ def render_sidebar() -> dict:
 
     skip_download = st.sidebar.checkbox(
         "Use cached OHLCV",
-        value=True,
-        help="Skip download if data/ohlcv/{SYMBOL}_5m.csv already exists.",
+        value=False,
+        help="Reuse saved CSV when it has enough candles. Still trims to the selected day count. "
+        "Re-downloads automatically if cache is too short.",
     )
 
     st.sidebar.subheader("RSI Filter (5M)")
@@ -176,13 +178,21 @@ def render_overview(pipeline: PipelineResult) -> None:
     result = pipeline.result
     st.subheader("Overview")
 
+    date_from = pipeline.candles_5m[0]["timestamp"][:10] if pipeline.candles_5m else "—"
+    date_to = pipeline.candles_5m[-1]["timestamp"][:10] if pipeline.candles_5m else "—"
+
     cols = st.columns(6)
     cols[0].metric("Symbol", pipeline.symbol)
-    cols[1].metric("5M candles", len(pipeline.candles_5m))
-    cols[2].metric("Breaks", result.breaks_detected)
-    cols[3].metric("Retest entries", result.retest_entries)
+    cols[1].metric("Requested days", pipeline.days)
+    cols[2].metric("5M candles", len(pipeline.candles_5m))
+    cols[3].metric("Breaks", result.breaks_detected)
     cols[4].metric("Trades", result.total_trades)
     cols[5].metric("Verdict", result.verdict)
+
+    st.caption(
+        f"Data window: **{date_from} → {date_to}** "
+        f"(target {expected_5m_candles(pipeline.days):,} candles for {pipeline.days} days)"
+    )
 
     st.markdown(
         f"**{result.rule_name}** — {_verdict_badge(result.verdict)} | "

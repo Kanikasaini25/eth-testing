@@ -5,8 +5,8 @@ from dataclasses import asdict, dataclass
 from src.rule_extractor import TradingRule
 
 FIXED_ENTRY_LOTS = 100
-PARTIAL_EXIT_LOTS = 80
-RUNNER_LOTS = 20
+PARTIAL_EXIT_LOTS = 50
+RUNNER_LOTS = 50
 
 
 @dataclass
@@ -480,10 +480,11 @@ def backtest_liquidity_intraday(
     max_trades = int(rule.parameters.get("max_trades_per_sequence", 3))
     max_full_sl = int(rule.parameters.get("max_full_stop_losses_per_session", 2))
     max_sl_pct = float(rule.parameters.get("max_stop_loss_pct", 5.0))
-    position_lots = FIXED_ENTRY_LOTS
-    partial_exit_lots = PARTIAL_EXIT_LOTS
-    runner_lots = RUNNER_LOTS
-    partial_target_points = float(rule.parameters.get("partial_target_points", 5))
+    position_lots = int(rule.parameters.get("position_lots", FIXED_ENTRY_LOTS))
+    partial_exit_lots = int(rule.parameters.get("partial_exit_lots", PARTIAL_EXIT_LOTS))
+    runner_lots = int(rule.parameters.get("runner_lots", RUNNER_LOTS))
+    partial_target_points = float(rule.parameters.get("partial_target_points", 10))
+    runner_target_points = float(rule.parameters.get("runner_target_points", 20))
     max_entries_per_line = int(rule.parameters.get("max_entries_per_liquidity_line_per_day", 1))
     min_sl_points = float(rule.parameters.get("min_stop_loss_points", 3.0))
     max_sl_points = float(rule.parameters.get("max_stop_loss_points", 7.0))
@@ -493,8 +494,8 @@ def backtest_liquidity_intraday(
     entry_on_next_candle = bool(rule.parameters.get("entry_on_next_candle", True))
     require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", True))
     partial_exit_reason = f"partial_target_{int(partial_target_points)}pts"
-    trailing_stop_points = float(rule.parameters.get("trailing_stop_points", 3.0))
-    use_trailing_after_partial = bool(rule.parameters.get("use_trailing_stop_after_partial", True))
+    runner_target_reason = f"runner_target_{int(runner_target_points)}pts"
+    use_trailing_after_partial = bool(rule.parameters.get("use_trailing_stop_after_partial", False))
     starting_wallet = float(rule.parameters.get("starting_wallet_usd", 10_000))
 
     trades: list[Trade] = []
@@ -505,12 +506,13 @@ def backtest_liquidity_intraday(
     side = ""
     entry_price = 0.0
     stop_loss = 0.0
+    initial_stop_loss = 0.0
+    runner_swing_stop = 0.0
     target_1 = 0.0
     target_2 = 0.0
     entry_ts = ""
     partial_taken = False
     runner_open = False
-    best_price = 0.0
 
     current_day = ""
     touched_upper = False
@@ -556,9 +558,7 @@ def backtest_liquidity_intraday(
 
         if in_position:
             if side == "long":
-                if partial_taken and runner_open and use_trailing_after_partial:
-                    best_price = max(best_price, high)
-                    stop_loss = max(entry_price, best_price - trailing_stop_points)
+                active_stop = runner_swing_stop if partial_taken else initial_stop_loss
 
                 if not partial_taken and high >= target_1:
                     equity = _close_trade(
@@ -576,12 +576,6 @@ def backtest_liquidity_intraday(
                     )
                     partial_taken = True
                     runner_open = True
-                    best_price = max(target_1, high)
-                    stop_loss = (
-                        max(entry_price, best_price - trailing_stop_points)
-                        if use_trailing_after_partial
-                        else entry_price
-                    )
                 elif partial_taken and runner_open and high >= target_2:
                     equity = _close_trade(
                         trades,
@@ -590,7 +584,7 @@ def backtest_liquidity_intraday(
                         timestamp,
                         entry_price,
                         target_2,
-                        "runner_swing_target",
+                        runner_target_reason,
                         "long",
                         runner_lots,
                         position_lots,
@@ -598,13 +592,8 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                elif low <= stop_loss:
-                    if partial_taken and use_trailing_after_partial and stop_loss > entry_price:
-                        reason = "trailing_stop"
-                    elif partial_taken and stop_loss == entry_price:
-                        reason = "breakeven_stop"
-                    else:
-                        reason = "stop_loss"
+                elif low <= active_stop:
+                    reason = "runner_swing_stop" if partial_taken else "stop_loss"
                     exit_lots = runner_lots if partial_taken else position_lots
                     equity = _close_trade(
                         trades,
@@ -612,7 +601,7 @@ def backtest_liquidity_intraday(
                         entry_ts,
                         timestamp,
                         entry_price,
-                        stop_loss,
+                        active_stop,
                         reason,
                         "long",
                         exit_lots,
@@ -629,9 +618,7 @@ def backtest_liquidity_intraday(
                             lower_line_blocked = True
 
             elif side == "short":
-                if partial_taken and runner_open and use_trailing_after_partial:
-                    best_price = min(best_price, low) if best_price > 0 else low
-                    stop_loss = min(entry_price, best_price + trailing_stop_points)
+                active_stop = runner_swing_stop if partial_taken else initial_stop_loss
 
                 if not partial_taken and low <= target_1:
                     equity = _close_trade(
@@ -649,12 +636,6 @@ def backtest_liquidity_intraday(
                     )
                     partial_taken = True
                     runner_open = True
-                    best_price = min(target_1, low)
-                    stop_loss = (
-                        min(entry_price, best_price + trailing_stop_points)
-                        if use_trailing_after_partial
-                        else entry_price
-                    )
                 elif partial_taken and runner_open and low <= target_2:
                     equity = _close_trade(
                         trades,
@@ -663,7 +644,7 @@ def backtest_liquidity_intraday(
                         timestamp,
                         entry_price,
                         target_2,
-                        "runner_swing_target",
+                        runner_target_reason,
                         "short",
                         runner_lots,
                         position_lots,
@@ -671,13 +652,8 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                elif high >= stop_loss:
-                    if partial_taken and use_trailing_after_partial and stop_loss < entry_price:
-                        reason = "trailing_stop"
-                    elif partial_taken and stop_loss == entry_price:
-                        reason = "breakeven_stop"
-                    else:
-                        reason = "stop_loss"
+                elif high >= active_stop:
+                    reason = "runner_swing_stop" if partial_taken else "stop_loss"
                     exit_lots = runner_lots if partial_taken else position_lots
                     equity = _close_trade(
                         trades,
@@ -685,7 +661,7 @@ def backtest_liquidity_intraday(
                         entry_ts,
                         timestamp,
                         entry_price,
-                        stop_loss,
+                        active_stop,
                         reason,
                         "short",
                         exit_lots,
@@ -750,22 +726,24 @@ def backtest_liquidity_intraday(
                     equity_curve.append(equity)
                     continue
                 entry_price = close if require_close_beyond_signal else pending_red["low"]
-                stop_loss = float(prev_row["high"]) if prev_row else pending_red["high"]
+                initial_stop_loss = float(prev_row["high"]) if prev_row else pending_red["high"]
+                stop_loss = initial_stop_loss
                 target_1 = _points_target(entry_price, "short", partial_target_points)
-                target_2 = _swing_low_before(daily_rows, day, swing_lookback)
+                target_2 = _points_target(entry_price, "short", runner_target_points)
+                runner_swing_stop = _swing_high_before(daily_rows, day, swing_lookback)
                 if (
                     _liquidity_entry_valid(
                         "short",
                         entry_price,
-                        stop_loss,
+                        initial_stop_loss,
                         partial_target_points,
                         min_sl_points=min_sl_points,
                         max_sl_points=max_sl_points,
                         min_reward_to_risk=min_reward_to_risk,
                         max_sl_pct=max_sl_pct,
                     )
-                    and target_2 > 0
-                    and entry_price > target_2
+                    and runner_swing_stop > 0
+                    and entry_price < runner_swing_stop
                 ):
                     in_position = True
                     side = "short"
@@ -790,22 +768,24 @@ def backtest_liquidity_intraday(
                     equity_curve.append(equity)
                     continue
                 entry_price = close if require_close_beyond_signal else pending_green["high"]
-                stop_loss = float(prev_row["low"]) if prev_row else pending_green["low"]
+                initial_stop_loss = float(prev_row["low"]) if prev_row else pending_green["low"]
+                stop_loss = initial_stop_loss
                 target_1 = _points_target(entry_price, "long", partial_target_points)
-                target_2 = _swing_high_before(daily_rows, day, swing_lookback)
+                target_2 = _points_target(entry_price, "long", runner_target_points)
+                runner_swing_stop = _swing_low_before(daily_rows, day, swing_lookback)
                 if (
                     _liquidity_entry_valid(
                         "long",
                         entry_price,
-                        stop_loss,
+                        initial_stop_loss,
                         partial_target_points,
                         min_sl_points=min_sl_points,
                         max_sl_points=max_sl_points,
                         min_reward_to_risk=min_reward_to_risk,
                         max_sl_pct=max_sl_pct,
                     )
-                    and target_2 > 0
-                    and entry_price < target_2
+                    and runner_swing_stop > 0
+                    and entry_price > runner_swing_stop
                 ):
                     in_position = True
                     side = "long"
@@ -851,8 +831,9 @@ def backtest_liquidity_intraday(
         "uses_5_point_partial_target": partial_target_points == 5,
         "keeps_runner_after_partial": True,
         "uses_trailing_stop_on_runner": use_trailing_after_partial,
-        "moves_stop_to_breakeven_after_partial": not use_trailing_after_partial,
-        "uses_swing_target_for_runner": True,
+        "uses_swing_stop_on_runner": not use_trailing_after_partial,
+        "uses_runner_target_from_entry": runner_target_points == 20,
+        "partial_exit_50_percent": partial_exit_lots == 50,
         "limits_max_trades_per_session": True,
         "limits_max_full_stop_losses": True,
         "one_attempt_per_liquidity_line_per_day": max_entries_per_line == 1,

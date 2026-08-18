@@ -6,7 +6,13 @@ from pathlib import Path
 
 from src.backtest import BacktestResult, backtest_swing_break_retest
 from src.config import OHLCV_DIR, REPORTS_DIR, STRATEGIES_DIR, ensure_data_dirs
-from src.data_fetcher import DeltaExchangeClient, load_ohlcv, save_ohlcv
+from src.data_fetcher import (
+    DeltaExchangeClient,
+    expected_5m_candles,
+    load_ohlcv,
+    save_ohlcv,
+    trim_ohlcv_to_days,
+)
 from src.report import generate_report, save_report, save_results_json
 
 
@@ -56,12 +62,21 @@ def run_backtest(
     rules_json = rules_file.read_text(encoding="utf-8")
 
     ohlcv_path = OHLCV_DIR / f"{symbol}_5m.csv"
+    required_candles = expected_5m_candles(days)
+
     if skip_download and ohlcv_path.exists():
         candles_5m = load_ohlcv(ohlcv_path)
+        if len(candles_5m) < required_candles:
+            client = DeltaExchangeClient(base_url=base_url)
+            candles_5m = client.fetch_historical_ohlcv(symbol, "5m", days)
+            save_ohlcv(candles_5m, ohlcv_path)
+        else:
+            candles_5m = trim_ohlcv_to_days(candles_5m, days, "5m")
     else:
         client = DeltaExchangeClient(base_url=base_url)
         candles_5m = client.fetch_historical_ohlcv(symbol, "5m", days)
         save_ohlcv(candles_5m, ohlcv_path)
+        candles_5m = trim_ohlcv_to_days(candles_5m, days, "5m")
 
     result = backtest_swing_break_retest(candles_5m, rule)
     report_content = generate_report(rules_json, [result], symbol, days)

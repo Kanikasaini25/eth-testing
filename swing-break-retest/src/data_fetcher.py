@@ -10,6 +10,7 @@ import requests
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
 MAX_BACKTEST_DAYS = 365
+CANDLES_PER_DAY_5M = 288
 
 RESOLUTION_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -23,6 +24,21 @@ RESOLUTION_SECONDS: dict[str, int] = {
     "6h": 21600,
     "1d": 86400,
 }
+
+
+def expected_5m_candles(days: int) -> int:
+    """One day on 5m timeframe = 288 candles (24 × 12)."""
+    return max(days, 0) * CANDLES_PER_DAY_5M
+
+
+def trim_ohlcv_to_days(rows: list[dict], days: int, resolution: str = "5m") -> list[dict]:
+    """Keep only the most recent N days of candles."""
+    if not rows or resolution != "5m":
+        return rows
+    expected = expected_5m_candles(days)
+    if len(rows) > expected:
+        return rows[-expected:]
+    return rows
 
 
 class DeltaExchangeClient:

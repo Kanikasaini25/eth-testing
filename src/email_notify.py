@@ -86,6 +86,8 @@ def send_entry_signal_email(
     entry_ts: str,
     upper_level: float | None = None,
     lower_level: float | None = None,
+    partial_target_points: float = 10,
+    runner_target_points: float = 20,
 ) -> EmailResult:
     trade_label = "BUY (LONG)" if side == "long" else "SELL (SHORT)"
     subject = f"LQDTY Entry Signal: {trade_label} {symbol} @ {entry_price:.2f}"
@@ -99,8 +101,8 @@ def send_entry_signal_email(
             f"Entry time:  {entry_ts}",
             f"Entry price: {entry_price:.2f}",
             f"Stop loss:   {stop_loss:.2f}",
-            f"Target 1:    {target_1:.2f} (partial {partial_lots} lots @ +5 pts)",
-            f"Target 2:    {target_2:.2f} (runner {runner_lots} lots swing target)",
+            f"Target 1:    {target_1:.2f} (partial {partial_lots} lots @ +{partial_target_points:g} pts)",
+            f"Target 2:    {target_2:.2f} (runner {runner_lots} lots @ +{runner_target_points:g} pts)",
             f"Size:        {entry_lots} lots",
             f"Liquidity:   {entry_line} line",
             "",
@@ -141,7 +143,7 @@ def send_partial_exit_email(
             f"Runner left:    {runner_lots} lots",
             f"Runner SL:      {runner_stop_loss:.2f}",
             "",
-            "80 lots booked. 20-lot runner continues with trailing stop.",
+            f"{partial_lots} lots booked. {runner_lots}-lot runner continues with swing stop.",
         ]
     )
     return send_email(subject, body)
@@ -164,6 +166,7 @@ def send_stop_loss_email(
         "stop_loss": "Stop Loss Hit",
         "trailing_stop": "Trailing Stop Hit",
         "breakeven_stop": "Breakeven Stop Hit",
+        "runner_swing_stop": "Runner Swing Stop Hit",
         "exchange_stop": "Stop Loss Hit (Exchange)",
     }
     headline = label_map.get(exit_type, "Stop Loss Hit")

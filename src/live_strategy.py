@@ -28,6 +28,8 @@ from src.email_notify import (
 )
 from src.rule_extractor import TradingRule, rules_from_json
 
+STOP_TICK_SIZE = 0.05
+
 
 @dataclass
 class LivePositionState:
@@ -38,10 +40,9 @@ class LivePositionState:
     target_2: float
     entry_line: str
     entry_ts: str
-    initial_stop_loss: float = 0.0
-    runner_swing_stop: float = 0.0
     partial_taken: bool = False
     runner_open: bool = False
+    best_price: float = 0.0
     entry_lots: int = FIXED_ENTRY_LOTS
     partial_lots: int = PARTIAL_EXIT_LOTS
     runner_lots: int = RUNNER_LOTS
@@ -229,6 +230,30 @@ class LiveLiquidityRunner:
         )
         position.stop_loss = stop_price
 
+    def _maybe_trail_runner_stop(
+        self,
+        position: LivePositionState,
+        mark_price: float,
+        trailing_points: float,
+    ) -> bool:
+        """Update runner stop only when it moves by at least one tick. Returns True if updated."""
+        if not (position.partial_taken and position.runner_open):
+            return False
+
+        if position.side == "long":
+            position.best_price = max(position.best_price, mark_price)
+            new_stop = max(position.entry_price, position.best_price - trailing_points)
+            if new_stop <= position.stop_loss + STOP_TICK_SIZE:
+                return False
+        else:
+            position.best_price = min(position.best_price or mark_price, mark_price)
+            new_stop = min(position.entry_price, position.best_price + trailing_points)
+            if new_stop >= position.stop_loss - STOP_TICK_SIZE:
+                return False
+
+        self._replace_runner_stop(position, new_stop)
+        return True
+
     def _execute_entry(
         self,
         side: str,
@@ -236,7 +261,6 @@ class LiveLiquidityRunner:
         stop_loss: float,
         target_1: float,
         target_2: float,
-        runner_swing_stop: float,
         entry_line: str,
         entry_ts: str,
     ) -> list[str]:
@@ -260,8 +284,6 @@ class LiveLiquidityRunner:
             stop_loss=stop_loss,
             target_1=target_1,
             target_2=target_2,
-            initial_stop_loss=stop_loss,
-            runner_swing_stop=runner_swing_stop,
             entry_line=entry_line,
             entry_ts=entry_ts,
             entry_lots=entry_lots,
@@ -271,9 +293,6 @@ class LiveLiquidityRunner:
         action = f"ENTER {side.upper()} {entry_lots} lots @ ~{entry_price:.2f}, SL {stop_loss:.2f}"
         self._log(action)
 
-        params = self._params()
-        partial_target_points = float(params.get("partial_target_points", 10))
-        runner_target_points = float(params.get("runner_target_points", 20))
         email_result = send_entry_signal_email(
             symbol=self.symbol,
             side=side,
@@ -288,8 +307,6 @@ class LiveLiquidityRunner:
             entry_ts=entry_ts,
             upper_level=self.state.upper_level,
             lower_level=self.state.lower_level,
-            partial_target_points=partial_target_points,
-            runner_target_points=runner_target_points,
         )
         self._send_email(email_result)
 
@@ -305,13 +322,26 @@ class LiveLiquidityRunner:
             reduce_only=True,
         )
 
-        self._replace_runner_stop(position, position.runner_swing_stop)
+        params = self._params()
+        trailing_points = float(params.get("trailing_stop_points", 3.0))
+        use_trailing = bool(params.get("use_trailing_stop_after_partial", True))
+        if use_trailing:
+            if position.side == "long":
+                position.best_price = max(position.target_1, exit_price)
+                position.stop_loss = max(position.entry_price, position.best_price - trailing_points)
+            else:
+                position.best_price = min(position.target_1, exit_price)
+                position.stop_loss = min(position.entry_price, position.best_price + trailing_points)
+        else:
+            position.stop_loss = position.entry_price
+
+        self._replace_runner_stop(position, position.stop_loss)
         position.partial_taken = True
         position.runner_open = True
 
         action = (
             f"PARTIAL EXIT {position.partial_lots} lots @ ~{exit_price:.2f}, "
-            f"runner SL {position.runner_swing_stop:.2f}"
+            f"runner SL {position.stop_loss:.2f}"
         )
         self._log(action)
         self._send_email(
@@ -345,7 +375,7 @@ class LiveLiquidityRunner:
         self.state.position = None
         action = f"RUNNER EXIT ({reason}) {position.runner_lots} lots @ ~{exit_price:.2f}"
         self._log(action)
-        if reason in {"stop_loss", "runner_swing_stop", "exchange_stop"}:
+        if reason in {"trailing_stop", "breakeven_stop", "stop_loss"}:
             self._send_email(
                 send_stop_loss_email(
                     symbol=self.symbol,
@@ -437,34 +467,50 @@ class LiveLiquidityRunner:
         if position is None:
             return []
 
+        params = self._params()
+        trailing_points = float(params.get("trailing_stop_points", 3.0))
+        use_trailing = bool(params.get("use_trailing_stop_after_partial", True))
         actions: list[str] = []
 
         exchange_size = self.trading.get_open_position_size(self.symbol)
         if exchange_size == 0:
             return self._sync_exchange_flat(mark_price)
 
-        initial_sl = position.initial_stop_loss or position.stop_loss
-        runner_sl = position.runner_swing_stop or position.stop_loss
-
         if position.side == "long":
+            if use_trailing:
+                self._maybe_trail_runner_stop(position, mark_price, trailing_points)
+
             if not position.partial_taken and mark_price >= position.target_1:
                 actions.extend(self._execute_partial_exit(position, mark_price))
             elif position.partial_taken and position.runner_open and mark_price >= position.target_2:
-                actions.extend(self._execute_runner_exit(position, mark_price, "runner_target_20pts"))
-            elif not position.partial_taken and mark_price <= initial_sl:
+                actions.extend(self._execute_runner_exit(position, mark_price, "swing_target"))
+            elif not position.partial_taken and mark_price <= position.stop_loss:
                 actions.extend(self._execute_full_stop(position, mark_price))
-            elif position.partial_taken and position.runner_open and mark_price <= runner_sl:
-                actions.extend(self._execute_runner_exit(position, mark_price, "runner_swing_stop"))
+            elif position.partial_taken and position.runner_open and mark_price <= position.stop_loss:
+                reason = (
+                    "breakeven_stop"
+                    if position.stop_loss == position.entry_price
+                    else "trailing_stop"
+                )
+                actions.extend(self._execute_runner_exit(position, mark_price, reason))
 
         elif position.side == "short":
+            if use_trailing:
+                self._maybe_trail_runner_stop(position, mark_price, trailing_points)
+
             if not position.partial_taken and mark_price <= position.target_1:
                 actions.extend(self._execute_partial_exit(position, mark_price))
             elif position.partial_taken and position.runner_open and mark_price <= position.target_2:
-                actions.extend(self._execute_runner_exit(position, mark_price, "runner_target_20pts"))
-            elif not position.partial_taken and mark_price >= initial_sl:
+                actions.extend(self._execute_runner_exit(position, mark_price, "swing_target"))
+            elif not position.partial_taken and mark_price >= position.stop_loss:
                 actions.extend(self._execute_full_stop(position, mark_price))
-            elif position.partial_taken and position.runner_open and mark_price >= runner_sl:
-                actions.extend(self._execute_runner_exit(position, mark_price, "runner_swing_stop"))
+            elif position.partial_taken and position.runner_open and mark_price >= position.stop_loss:
+                reason = (
+                    "breakeven_stop"
+                    if position.stop_loss == position.entry_price
+                    else "trailing_stop"
+                )
+                actions.extend(self._execute_runner_exit(position, mark_price, reason))
 
         return actions
 
@@ -484,8 +530,7 @@ class LiveLiquidityRunner:
         max_trades = int(params.get("max_trades_per_sequence", 3))
         max_full_sl = int(params.get("max_full_stop_losses_per_session", 2))
         max_entries_per_line = int(params.get("max_entries_per_liquidity_line_per_day", 1))
-        partial_target_points = float(params.get("partial_target_points", 10))
-        runner_target_points = float(params.get("runner_target_points", 20))
+        partial_target_points = float(params.get("partial_target_points", 5))
         min_sl_points = float(params.get("min_stop_loss_points", 3.0))
         max_sl_points = float(params.get("max_stop_loss_points", 7.0))
         min_reward_to_risk = float(params.get("min_reward_to_risk", 1.5))
@@ -537,8 +582,7 @@ class LiveLiquidityRunner:
                         entry_price = close if require_close_beyond_signal else pending_red["low"]
                         stop_loss = float(prev_row["high"]) if prev_row else pending_red["high"]
                         target_1 = _points_target(entry_price, "short", partial_target_points)
-                        target_2 = _points_target(entry_price, "short", runner_target_points)
-                        runner_swing_stop = _swing_high_before(daily_rows, day, swing_lookback)
+                        target_2 = _swing_low_before(daily_rows, day, swing_lookback)
                         if (
                             _liquidity_entry_valid(
                                 "short",
@@ -550,8 +594,8 @@ class LiveLiquidityRunner:
                                 min_reward_to_risk=min_reward_to_risk,
                                 max_sl_pct=max_sl_pct,
                             )
-                            and runner_swing_stop > 0
-                            and entry_price < runner_swing_stop
+                            and target_2 > 0
+                            and entry_price > target_2
                         ):
                             session.trades_in_sequence += 1
                             session.upper_entries_today += 1
@@ -563,7 +607,6 @@ class LiveLiquidityRunner:
                                     stop_loss,
                                     target_1,
                                     target_2,
-                                    runner_swing_stop,
                                     "upper",
                                     timestamp,
                                 )
@@ -580,8 +623,7 @@ class LiveLiquidityRunner:
                         entry_price = close if require_close_beyond_signal else pending_green["high"]
                         stop_loss = float(prev_row["low"]) if prev_row else pending_green["low"]
                         target_1 = _points_target(entry_price, "long", partial_target_points)
-                        target_2 = _points_target(entry_price, "long", runner_target_points)
-                        runner_swing_stop = _swing_low_before(daily_rows, day, swing_lookback)
+                        target_2 = _swing_high_before(daily_rows, day, swing_lookback)
                         if (
                             _liquidity_entry_valid(
                                 "long",
@@ -593,8 +635,8 @@ class LiveLiquidityRunner:
                                 min_reward_to_risk=min_reward_to_risk,
                                 max_sl_pct=max_sl_pct,
                             )
-                            and runner_swing_stop > 0
-                            and entry_price > runner_swing_stop
+                            and target_2 > 0
+                            and entry_price < target_2
                         ):
                             session.trades_in_sequence += 1
                             session.lower_entries_today += 1
@@ -606,7 +648,6 @@ class LiveLiquidityRunner:
                                     stop_loss,
                                     target_1,
                                     target_2,
-                                    runner_swing_stop,
                                     "lower",
                                     timestamp,
                                 )

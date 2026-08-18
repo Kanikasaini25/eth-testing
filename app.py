@@ -322,7 +322,7 @@ def render_demo_account(symbol: str, base_url: str) -> None:
     st.markdown("**Trading API (ready)**")
     st.code(
         "client.place_market_order(size=100, side='buy')   # 100 lots long\n"
-        "client.place_market_order(size=50, side='sell', reduce_only=True)  # partial exit\n"
+        "client.place_market_order(size=80, side='sell', reduce_only=True)  # partial exit\n"
         "client.place_stop_order(size=100, side='sell', stop_price=...)  # stop loss",
         language="python",
     )
@@ -333,7 +333,7 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
     st.caption(
         f"Runs the same liquidity strategy as backtest on **{env_label}**. "
-        f"100 lots entry · 50 partial @ +10 pts · 50 runner @ +20 pts with swing stop."
+        f"100 lots entry · 80 partial @ +5 pts · 20 runner with trailing stop."
     )
 
     rules_path = default_rules_path()
@@ -568,7 +568,7 @@ def _render_backtest_page(settings: dict) -> None:
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    "Lot-points = points × lots (e.g. 50 lots × 10 pts = 500). "
+                    "Lot-points = points × lots (e.g. 80 lots × 10 pts = 800). "
                     "Blue dot = entry, green/red dot = exit."
                 )
 

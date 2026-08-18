@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from src.indicators import compute_rsi
 from src.swing import SwingLevel, latest_swings_before, resample_ohlcv
 
 
@@ -25,7 +24,6 @@ class EntrySignal:
     take_profit: float
     broken_level: float
     retest_index: int
-    rsi_at_entry: float | None = None
 
 
 @dataclass
@@ -41,12 +39,6 @@ class StrategyConfig:
     min_stop_loss_pct: float = 0.05
     max_stop_loss_pct: float = 1.5
     max_entry_distance_from_level_pct: float = 0.5
-    use_rsi_filter: bool = True
-    rsi_period: int = 14
-    rsi_long_min: float = 50.0
-    rsi_short_max: float = 50.0
-    rsi_overbought: float = 70.0
-    rsi_oversold: float = 30.0
     starting_wallet_usd: float = 10_000.0
 
 
@@ -152,8 +144,6 @@ def find_retest_entry(
         return None
 
     end_index = min(len(candles_5m), start_index + config.retest_window_candles)
-    closes = [float(row["close"]) for row in candles_5m]
-    rsi_values = compute_rsi(closes, config.rsi_period) if config.use_rsi_filter else []
 
     for index in range(start_index + 1, end_index):
         row = candles_5m[index]
@@ -178,8 +168,6 @@ def find_retest_entry(
                 continue
             if not _entry_valid("long", close, stop_loss, break_event.level, config):
                 continue
-            if not _rsi_valid("long", rsi_values, index, config):
-                continue
 
             return EntrySignal(
                 direction="long",
@@ -189,7 +177,6 @@ def find_retest_entry(
                 take_profit=close + (risk * config.reward_risk_ratio),
                 broken_level=break_event.level,
                 retest_index=index,
-                rsi_at_entry=rsi_values[index] if config.use_rsi_filter else None,
             )
 
         touched = high >= break_event.level - tolerance
@@ -206,8 +193,6 @@ def find_retest_entry(
             continue
         if not _entry_valid("short", close, stop_loss, break_event.level, config):
             continue
-        if not _rsi_valid("short", rsi_values, index, config):
-            continue
 
         return EntrySignal(
             direction="short",
@@ -217,7 +202,6 @@ def find_retest_entry(
             take_profit=close - (risk * config.reward_risk_ratio),
             broken_level=break_event.level,
             retest_index=index,
-            rsi_at_entry=rsi_values[index] if config.use_rsi_filter else None,
         )
 
     return None
@@ -251,26 +235,6 @@ def _entry_valid(
     return True
 
 
-def _rsi_valid(
-    direction: str,
-    rsi_values: list[float | None],
-    index: int,
-    config: StrategyConfig,
-) -> bool:
-    if not config.use_rsi_filter:
-        return True
-    if index >= len(rsi_values):
-        return False
-
-    rsi = rsi_values[index]
-    if rsi is None:
-        return False
-
-    if direction == "long":
-        return config.rsi_long_min <= rsi <= config.rsi_overbought
-    return config.rsi_oversold <= rsi <= config.rsi_short_max
-
-
 def load_strategy_config(parameters: dict) -> StrategyConfig:
     return StrategyConfig(
         setup_timeframe_minutes=int(parameters.get("setup_timeframe_minutes", 30)),
@@ -286,11 +250,5 @@ def load_strategy_config(parameters: dict) -> StrategyConfig:
         max_entry_distance_from_level_pct=float(
             parameters.get("max_entry_distance_from_level_pct", 0.5)
         ),
-        use_rsi_filter=bool(parameters.get("use_rsi_filter", True)),
-        rsi_period=int(parameters.get("rsi_period", 14)),
-        rsi_long_min=float(parameters.get("rsi_long_min", 50.0)),
-        rsi_short_max=float(parameters.get("rsi_short_max", 50.0)),
-        rsi_overbought=float(parameters.get("rsi_overbought", 70.0)),
-        rsi_oversold=float(parameters.get("rsi_oversold", 30.0)),
         starting_wallet_usd=float(parameters.get("starting_wallet_usd", 10_000)),
     )

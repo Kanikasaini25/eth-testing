@@ -79,15 +79,14 @@ def generate_report(
 
         lines.extend(
             [
-                "| Side | Entry | Exit | Entry Price | Exit Price | RSI | SL | TP | Broken Level | Return | Reason |",
-                "|------|-------|------|-------------|------------|-----|----|----|--------------|--------|--------|",
+                "| Side | Entry | Exit | Entry Price | Exit Price | SL | TP | Broken Level | Return | Reason |",
+                "|------|-------|------|-------------|------------|----|----|--------------|--------|--------|",
             ]
         )
         for trade in result.trades:
-            rsi_label = trade.rsi_at_entry if trade.rsi_at_entry is not None else "—"
             lines.append(
                 f"| {trade.trade_type} | {trade.entry_date} | {trade.exit_date} | "
-                f"{trade.entry_price} | {trade.exit_price} | {rsi_label} | {trade.stop_loss} | "
+                f"{trade.entry_price} | {trade.exit_price} | {trade.stop_loss} | "
                 f"{trade.take_profit} | {trade.broken_level} | {trade.return_pct}% | "
                 f"{trade.exit_reason} |"
             )

@@ -27,7 +27,6 @@ class Trade:
     take_profit: float
     broken_level: float
     wallet_balance: float
-    rsi_at_entry: float | None = None
 
 
 @dataclass
@@ -72,7 +71,6 @@ def _build_trade(
     starting_wallet: float,
     equity: float,
 ) -> Trade:
-    rsi = round(signal.rsi_at_entry, 2) if signal.rsi_at_entry is not None else None
     return Trade(
         entry_date=entry_date,
         exit_date=exit_date,
@@ -86,7 +84,6 @@ def _build_trade(
         take_profit=round(signal.take_profit, 2),
         broken_level=round(signal.broken_level, 2),
         wallet_balance=round(starting_wallet * equity, 2),
-        rsi_at_entry=rsi,
     )
 
 
@@ -295,7 +292,6 @@ def _build_result(
         "no_liquidity_concept": True,
         "requires_5m_confirmation_candle": bool(params.get("require_confirmation_candle", True)),
         "filters_min_max_stop_loss": True,
-        "uses_rsi_filter_on_5m": bool(params.get("use_rsi_filter", True)),
         "supports_long_and_short": True,
     }
 

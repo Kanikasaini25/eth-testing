@@ -47,7 +47,6 @@ def _trades_table(result: BacktestResult) -> list[dict]:
             "Entry Price": trade.entry_price,
             "Exit Price": trade.exit_price,
             "Broken Level": trade.broken_level,
-            "RSI": trade.rsi_at_entry if trade.rsi_at_entry is not None else "—",
             "Stop Loss": trade.stop_loss,
             "Take Profit": trade.take_profit,
             "Return %": trade.return_pct,
@@ -100,44 +99,6 @@ def render_sidebar() -> dict:
         "Re-downloads automatically if cache is too short.",
     )
 
-    st.sidebar.subheader("RSI Filter (5M)")
-    use_rsi_filter = st.sidebar.checkbox(
-        "Enable RSI filter",
-        value=True,
-        help="Require RSI momentum confirmation on the 5M entry candle.",
-    )
-    rsi_period = st.sidebar.slider("RSI period", min_value=5, max_value=30, value=14, step=1)
-    rsi_long_min = st.sidebar.slider(
-        "Long: min RSI",
-        min_value=40.0,
-        max_value=60.0,
-        value=50.0,
-        step=1.0,
-        help="Long entries need RSI at or above this level.",
-    )
-    rsi_overbought = st.sidebar.slider(
-        "Long: max RSI (overbought)",
-        min_value=60.0,
-        max_value=85.0,
-        value=70.0,
-        step=1.0,
-    )
-    rsi_oversold = st.sidebar.slider(
-        "Short: min RSI (oversold)",
-        min_value=15.0,
-        max_value=40.0,
-        value=30.0,
-        step=1.0,
-    )
-    rsi_short_max = st.sidebar.slider(
-        "Short: max RSI",
-        min_value=40.0,
-        max_value=60.0,
-        value=50.0,
-        step=1.0,
-        help="Short entries need RSI at or below this level.",
-    )
-
     run = st.sidebar.button("Run Backtest", type="primary", use_container_width=True)
 
     return {
@@ -147,14 +108,6 @@ def render_sidebar() -> dict:
         "starting_wallet_usd": starting_wallet,
         "base_url": base_url,
         "skip_download": skip_download,
-        "parameter_overrides": {
-            "use_rsi_filter": use_rsi_filter,
-            "rsi_period": rsi_period,
-            "rsi_long_min": rsi_long_min,
-            "rsi_short_max": rsi_short_max,
-            "rsi_overbought": rsi_overbought,
-            "rsi_oversold": rsi_oversold,
-        },
     }
 
 
@@ -170,7 +123,7 @@ def render_strategy_summary() -> None:
     )
     st.caption(
         "Mark 30M swing high/low → wait for break → retest broken level on 5M → "
-        "enter in breakout direction. RSI(14) on 5M confirms momentum."
+        "enter in breakout direction. No liquidity concept."
     )
 
 
@@ -318,9 +271,8 @@ def main() -> None:
             2. Build 30M swing highs/lows from pivots
             3. Detect first break of swing high (long) or swing low (short)
             4. Wait for 5M retest + confirmation candle
-            5. Confirm with RSI(14): long 50–70, short 30–50
-            6. Simulate trades with stop loss and take profit
-            7. Show results, charts, and downloadable report
+            5. Simulate trades with stop loss and take profit
+            6. Show results, charts, and downloadable report
             """
         )
         return
@@ -333,7 +285,6 @@ def main() -> None:
                 starting_wallet_usd=settings["starting_wallet_usd"],
                 base_url=settings["base_url"],
                 skip_download=settings["skip_download"],
-                parameter_overrides=settings["parameter_overrides"],
             )
     except Exception as exc:  # noqa: BLE001
         st.error(f"Backtest failed: {exc}")

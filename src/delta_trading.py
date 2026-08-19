@@ -342,6 +342,23 @@ class DeltaTradingClient:
             reduce_only="true" if reduce_only else "false",
         )
 
+    def get_product_tick_size(self, symbol: str | None = None) -> float:
+        tick = self.get_product(symbol).get("tick_size")
+        return float(tick) if tick else 0.05
+
+    def stop_would_trigger_immediately(
+        self,
+        stop_side: str,
+        stop_price: float,
+        mark_price: float,
+        *,
+        symbol: str | None = None,
+    ) -> bool:
+        tick = self.get_product_tick_size(symbol)
+        if stop_side == "buy":
+            return stop_price <= mark_price + tick
+        return stop_price >= mark_price - tick
+
     def place_stop_order(
         self,
         size: int,
@@ -351,7 +368,14 @@ class DeltaTradingClient:
         symbol: str | None = None,
         limit_price: float | None = None,
         reduce_only: bool = True,
+        mark_price: float | None = None,
     ) -> dict[str, Any]:
+        mark = mark_price if mark_price is not None else self.get_mark_price(symbol)
+        if self.stop_would_trigger_immediately(side, stop_price, mark, symbol=symbol):
+            raise ValueError(
+                f"Stop {side} @ {stop_price:.2f} would trigger immediately (mark {mark:.2f})"
+            )
+
         product_id = self.get_product_id(symbol)
         order: dict[str, Any] = {
             "product_id": product_id,
@@ -364,6 +388,40 @@ class DeltaTradingClient:
             "reduce_only": reduce_only,
         }
         return self.client.create_order(order)
+
+    def place_stop_or_market_close(
+        self,
+        size: int,
+        stop_side: str,
+        stop_price: float,
+        *,
+        symbol: str | None = None,
+        reduce_only: bool = True,
+    ) -> dict[str, Any]:
+        """Place stop if valid; otherwise close at market (stop already breached)."""
+        mark = self.get_mark_price(symbol)
+        try:
+            return self.place_stop_order(
+                size=size,
+                side=stop_side,
+                stop_price=stop_price,
+                symbol=symbol,
+                reduce_only=reduce_only,
+                mark_price=mark,
+            )
+        except ValueError as exc:
+            if "would trigger immediately" not in str(exc).lower():
+                raise
+        except Exception as exc:
+            if "immediate_execution_stop_order" not in str(exc).lower():
+                raise
+
+        return self.place_market_order(
+            size=size,
+            side=stop_side,
+            symbol=symbol,
+            reduce_only=reduce_only,
+        )
 
     def cancel_all_orders(self, symbol: str | None = None) -> dict[str, Any]:
         product_id = self.get_product_id(symbol)

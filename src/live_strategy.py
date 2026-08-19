@@ -217,17 +217,50 @@ class LiveLiquidityRunner:
     def _exit_side(self, side: str) -> str:
         return "sell" if side == "long" else "buy"
 
-    def _replace_runner_stop(self, position: LivePositionState, stop_price: float) -> None:
-        """Cancel old stops and place exactly one reduce-only runner stop."""
+    def _replace_runner_stop(
+        self,
+        position: LivePositionState,
+        stop_price: float,
+        mark_price: float | None = None,
+    ) -> None:
+        """Cancel old stops and place one reduce-only runner stop (or market exit if breached)."""
         exit_side = self._exit_side(position.side)
+        mark = mark_price if mark_price is not None else self.trading.get_mark_price(self.symbol)
+
         self.trading.cancel_open_orders(symbol=self.symbol)
-        self.trading.place_stop_order(
-            size=position.runner_lots,
-            side=exit_side,
-            stop_price=stop_price,
-            symbol=self.symbol,
-            reduce_only=True,
-        )
+        if self.trading.stop_would_trigger_immediately(exit_side, stop_price, mark, symbol=self.symbol):
+            self.trading.place_market_order(
+                size=position.runner_lots,
+                side=exit_side,
+                symbol=self.symbol,
+                reduce_only=True,
+            )
+            self.state.position = None
+            self._log(f"Runner stop breached @ {mark:.2f} — closed {position.runner_lots} lots at market")
+            return
+
+        try:
+            self.trading.place_stop_order(
+                size=position.runner_lots,
+                side=exit_side,
+                stop_price=stop_price,
+                symbol=self.symbol,
+                reduce_only=True,
+                mark_price=mark,
+            )
+        except Exception as exc:
+            if "immediate_execution_stop_order" not in str(exc).lower():
+                raise
+            self.trading.place_market_order(
+                size=position.runner_lots,
+                side=exit_side,
+                symbol=self.symbol,
+                reduce_only=True,
+            )
+            self.state.position = None
+            self._log(f"Runner stop rejected @ {mark:.2f} — closed {position.runner_lots} lots at market")
+            return
+
         position.stop_loss = stop_price
 
     def _maybe_trail_runner_stop(
@@ -251,8 +284,46 @@ class LiveLiquidityRunner:
             if new_stop >= position.stop_loss - STOP_TICK_SIZE:
                 return False
 
-        self._replace_runner_stop(position, new_stop)
+        self._replace_runner_stop(position, new_stop, mark_price)
         return True
+
+    def _expected_exchange_size(self) -> int:
+        """Signed lot size the exchange should show for the tracked position."""
+        position = self.state.position
+        if position is None:
+            return 0
+        if position.partial_taken and position.runner_open:
+            lots = position.runner_lots
+        else:
+            lots = position.entry_lots
+        return -lots if position.side == "short" else lots
+
+    def _adjust_entry_stop_price(self, side: str, stop_loss: float, mark: float) -> float:
+        tick = self.trading.get_product_tick_size(self.symbol)
+        if side == "short" and stop_loss <= mark + tick:
+            return mark + max(tick, 3.0)
+        if side == "long" and stop_loss >= mark - tick:
+            return mark - max(tick, 3.0)
+        return stop_loss
+
+    def _place_entry_stop(
+        self,
+        side: str,
+        stop_side: str,
+        stop_loss: float,
+        entry_lots: int,
+    ) -> float:
+        mark = self.trading.get_mark_price(self.symbol)
+        adjusted = self._adjust_entry_stop_price(side, stop_loss, mark)
+        self.trading.place_stop_order(
+            size=entry_lots,
+            side=stop_side,
+            stop_price=adjusted,
+            symbol=self.symbol,
+            reduce_only=True,
+            mark_price=mark,
+        )
+        return adjusted
 
     def _execute_entry(
         self,
@@ -269,19 +340,41 @@ class LiveLiquidityRunner:
         order_side = self._order_side(side)
         stop_side = self._exit_side(side)
 
+        exchange_size = self.trading.get_open_position_size(self.symbol)
+        if exchange_size != 0:
+            msg = (
+                f"Entry blocked: exchange has {exchange_size} lots but bot is flat — "
+                "flatten on Delta first"
+            )
+            self._log(msg)
+            return [msg]
+
         self.trading.place_market_order(size=entry_lots, side=order_side, symbol=self.symbol)
-        self.trading.place_stop_order(
-            size=entry_lots,
-            side=stop_side,
-            stop_price=stop_loss,
-            symbol=self.symbol,
-            reduce_only=True,
-        )
+        try:
+            placed_sl = self._place_entry_stop(side, stop_side, stop_loss, entry_lots)
+        except Exception as exc:
+            rollback_msg = f"Stop order failed — rolling back {entry_lots} lots"
+            self._log(rollback_msg)
+            try:
+                self.trading.place_market_order(
+                    size=entry_lots,
+                    side=stop_side,
+                    symbol=self.symbol,
+                    reduce_only=True,
+                )
+                detail = f"Entry aborted: {exc}"
+            except Exception as rollback_exc:
+                detail = (
+                    f"CRITICAL: {entry_lots} lots open on exchange, stop and rollback failed: "
+                    f"{rollback_exc}"
+                )
+            self._log(detail)
+            return [rollback_msg, detail]
 
         self.state.position = LivePositionState(
             side=side,
             entry_price=entry_price,
-            stop_loss=stop_loss,
+            stop_loss=placed_sl,
             target_1=target_1,
             target_2=target_2,
             entry_line=entry_line,
@@ -290,7 +383,7 @@ class LiveLiquidityRunner:
             partial_lots=int(params.get("partial_exit_lots", PARTIAL_EXIT_LOTS)),
             runner_lots=int(params.get("runner_lots", RUNNER_LOTS)),
         )
-        action = f"ENTER {side.upper()} {entry_lots} lots @ ~{entry_price:.2f}, SL {stop_loss:.2f}"
+        action = f"ENTER {side.upper()} {entry_lots} lots @ ~{entry_price:.2f}, SL {placed_sl:.2f}"
         self._log(action)
 
         email_result = send_entry_signal_email(
@@ -335,7 +428,7 @@ class LiveLiquidityRunner:
         else:
             position.stop_loss = position.entry_price
 
-        self._replace_runner_stop(position, position.stop_loss)
+        self._replace_runner_stop(position, position.stop_loss, exit_price)
         position.partial_taken = True
         position.runner_open = True
 
@@ -475,6 +568,15 @@ class LiveLiquidityRunner:
         exchange_size = self.trading.get_open_position_size(self.symbol)
         if exchange_size == 0:
             return self._sync_exchange_flat(mark_price)
+
+        expected = self._expected_exchange_size()
+        if exchange_size != expected:
+            msg = (
+                f"Position mismatch: exchange {exchange_size} lots vs tracked {expected} — "
+                "flatten on Delta and reset state before continuing"
+            )
+            self._log(msg)
+            return [msg]
 
         if position.side == "long":
             if use_trailing:
@@ -696,29 +798,36 @@ class LiveLiquidityRunner:
                 else:
                     actions.extend(self._manage_open_position(mark_price))
             else:
-                closed_bars = self._closed_bars_today(intraday_rows, day)
-                new_bars = self._new_closed_bars(closed_bars)
-                bar_index = {row["timestamp"]: idx for idx, row in enumerate(closed_bars)}
-                processed = 0
+                exchange_size = self.trading.get_open_position_size(self.symbol)
+                if exchange_size != 0:
+                    actions.append(
+                        f"Orphan position on exchange: {exchange_size} lots — "
+                        "bot is flat; close on Delta before new entries"
+                    )
+                else:
+                    closed_bars = self._closed_bars_today(intraday_rows, day)
+                    new_bars = self._new_closed_bars(closed_bars)
+                    bar_index = {row["timestamp"]: idx for idx, row in enumerate(closed_bars)}
+                    processed = 0
 
-                for row in new_bars:
-                    prev_row = None
-                    idx = bar_index.get(row["timestamp"])
-                    if idx is not None and idx > 0:
-                        prev_row = closed_bars[idx - 1]
-                    if not dry_run:
-                        actions.extend(
-                            self._process_entry_bar(row, prev_row, daily_rows, upper, lower)
-                        )
-                    processed += 1
-                    self.state.session.last_processed_ts = row["timestamp"]
-                    if self.state.position is not None:
-                        break
+                    for row in new_bars:
+                        prev_row = None
+                        idx = bar_index.get(row["timestamp"])
+                        if idx is not None and idx > 0:
+                            prev_row = closed_bars[idx - 1]
+                        if not dry_run:
+                            actions.extend(
+                                self._process_entry_bar(row, prev_row, daily_rows, upper, lower)
+                            )
+                        processed += 1
+                        self.state.session.last_processed_ts = row["timestamp"]
+                        if self.state.position is not None:
+                            break
 
-                if dry_run and processed:
-                    actions.append(f"[DRY RUN] Scanned {processed} closed 1m bars — no orders placed")
-                elif processed and not actions:
-                    actions.append(f"Scanned {processed} new 1m bars — no entry signal")
+                    if dry_run and processed:
+                        actions.append(f"[DRY RUN] Scanned {processed} closed 1m bars — no orders placed")
+                    elif processed and not actions:
+                        actions.append(f"Scanned {processed} new 1m bars — no entry signal")
 
             exchange_position = self.trading.get_open_position_size(self.symbol)
             self._save_state()

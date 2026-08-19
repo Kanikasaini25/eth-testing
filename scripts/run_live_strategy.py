@@ -43,7 +43,7 @@ def main() -> int:
         while True:
             code = run_tick()
             if code != 0:
-                return code
+                print(f"Retrying in {args.interval}s...")
             time.sleep(args.interval)
 
     return run_tick()

@@ -72,14 +72,14 @@ def generate_report(
 
         lines.extend(
             [
-                "| Entry | Exit | Entry Price | Exit Price | Return | Reason |",
-                "|-------|------|-------------|------------|--------|--------|",
+                "| Entry | Exit | Entry Price | Exit Price | Points | P/L ($) | Reason |",
+                "|-------|------|-------------|------------|--------|---------|--------|",
             ]
         )
         for trade in result.trades:
             lines.append(
                 f"| {trade.entry_date} | {trade.exit_date} | {trade.entry_price} | "
-                f"{trade.exit_price} | {trade.return_pct}% | {trade.exit_reason} |"
+                f"{trade.exit_price} | {trade.points} | ${trade.pnl_usd:+.2f} | {trade.exit_reason} |"
             )
         lines.append("")
 

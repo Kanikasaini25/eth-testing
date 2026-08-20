@@ -11,11 +11,11 @@ from src.backtest import (
     PARTIAL_EXIT_LOTS,
     RUNNER_LOTS,
     _daily_liquidity_levels,
-    _liquidity_entry_valid,
-    _points_target,
+    _liquidity_sweep_at_lower,
+    _liquidity_sweep_at_upper,
+    _liquidity_targets,
+    _passes_liquidity_entry_filters,
     _signal_body_ratio,
-    _swing_high_before,
-    _swing_low_before,
 )
 from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs
 from src.delta_data import DeltaExchangeClient
@@ -29,6 +29,21 @@ from src.email_notify import (
 from src.rule_extractor import TradingRule, rules_from_json
 
 STOP_TICK_SIZE = 0.05
+
+
+def _normalize_pending_signal(pending: dict | None) -> dict | None:
+    """Drop legacy pending signals saved before the close field was added."""
+    if not pending:
+        return None
+    if "close" not in pending:
+        return None
+    return pending
+
+
+def _pending_signal_close(pending: dict, side: str) -> float:
+    if "close" in pending:
+        return float(pending["close"])
+    return float(pending["low"] if side == "short" else pending["high"])
 
 
 @dataclass
@@ -130,6 +145,8 @@ class LiveLiquidityRunner:
             return LiveStrategyState(symbol=self.symbol)
         raw = json.loads(self.state_path.read_text(encoding="utf-8"))
         session = LiveSessionState(**raw.pop("session", {}))
+        session.pending_red = _normalize_pending_signal(session.pending_red)
+        session.pending_green = _normalize_pending_signal(session.pending_green)
         position_raw = raw.pop("position", None)
         position = LivePositionState(**position_raw) if position_raw else None
         return LiveStrategyState(session=session, position=position, **raw)
@@ -337,6 +354,8 @@ class LiveLiquidityRunner:
     ) -> list[str]:
         params = self._params()
         entry_lots = int(params.get("position_lots", FIXED_ENTRY_LOTS))
+        partial_lots = int(params.get("partial_exit_lots", entry_lots * PARTIAL_EXIT_LOTS // FIXED_ENTRY_LOTS))
+        runner_lots = int(params.get("runner_lots", entry_lots - partial_lots))
         order_side = self._order_side(side)
         stop_side = self._exit_side(side)
 
@@ -380,8 +399,8 @@ class LiveLiquidityRunner:
             entry_line=entry_line,
             entry_ts=entry_ts,
             entry_lots=entry_lots,
-            partial_lots=int(params.get("partial_exit_lots", PARTIAL_EXIT_LOTS)),
-            runner_lots=int(params.get("runner_lots", RUNNER_LOTS)),
+            partial_lots=partial_lots,
+            runner_lots=runner_lots,
         )
         action = f"ENTER {side.upper()} {entry_lots} lots @ ~{entry_price:.2f}, SL {placed_sl:.2f}"
         self._log(action)
@@ -394,8 +413,8 @@ class LiveLiquidityRunner:
             target_1=target_1,
             target_2=target_2,
             entry_lots=entry_lots,
-            partial_lots=int(params.get("partial_exit_lots", PARTIAL_EXIT_LOTS)),
-            runner_lots=int(params.get("runner_lots", RUNNER_LOTS)),
+            partial_lots=partial_lots,
+            runner_lots=runner_lots,
             entry_line=entry_line,
             entry_ts=entry_ts,
             upper_level=self.state.upper_level,
@@ -633,14 +652,21 @@ class LiveLiquidityRunner:
         max_full_sl = int(params.get("max_full_stop_losses_per_session", 2))
         max_entries_per_line = int(params.get("max_entries_per_liquidity_line_per_day", 1))
         partial_target_points = float(params.get("partial_target_points", 5))
-        min_sl_points = float(params.get("min_stop_loss_points", 3.0))
-        max_sl_points = float(params.get("max_stop_loss_points", 7.0))
-        min_reward_to_risk = float(params.get("min_reward_to_risk", 1.5))
-        min_signal_body_ratio = float(params.get("min_signal_body_ratio", 0.55))
-        min_signal_range_points = float(params.get("min_signal_range_points", 2.5))
+        use_swing_target_for_partial = bool(params.get("use_swing_target_for_partial", True))
+        min_sl_points = float(params.get("min_stop_loss_points", 0.0))
+        max_sl_points = float(params.get("max_stop_loss_points", 50.0))
+        min_reward_to_risk = float(params.get("min_reward_to_risk", 1.0))
+        min_signal_body_ratio = float(params.get("min_signal_body_ratio", 0.35))
+        min_signal_range_points = float(params.get("min_signal_range_points", 0.0))
         entry_on_next_candle = bool(params.get("entry_on_next_candle", True))
-        require_close_beyond_signal = bool(params.get("require_close_beyond_signal", True))
+        require_close_beyond_signal = bool(params.get("require_close_beyond_signal", False))
+        require_liquidity_sweep = bool(params.get("require_liquidity_sweep", True))
+        use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
+        use_session_filter = bool(params.get("use_session_filter", False))
+        session_start_hour_utc = int(params.get("session_start_hour_utc", 8))
+        session_end_hour_utc = int(params.get("session_end_hour_utc", 20))
         swing_lookback = int(params.get("swing_lookback_days", 20))
+        runner_swing_lookback = int(params.get("runner_swing_lookback_days", 60))
         max_sl_pct = float(params.get("max_stop_loss_pct", 5.0))
 
         if session.full_sl_count >= max_full_sl or session.trades_in_sequence >= max_trades:
@@ -663,13 +689,29 @@ class LiveLiquidityRunner:
 
         if session.touched_upper and close < open_price:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
-            if body_ratio >= min_signal_body_ratio and (high - low) >= min_signal_range_points:
-                session.pending_red = {"high": high, "low": low, "index_ts": timestamp}
+            sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_upper(high, close, upper)
+            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
+            range_ok = min_signal_range_points <= 0 or (high - low) >= min_signal_range_points
+            if body_ok and range_ok and sweep_ok:
+                session.pending_red = {
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "index_ts": timestamp,
+                }
 
         if session.touched_lower and close > open_price:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
-            if body_ratio >= min_signal_body_ratio and (high - low) >= min_signal_range_points:
-                session.pending_green = {"high": high, "low": low, "index_ts": timestamp}
+            sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_lower(low, close, lower)
+            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
+            range_ok = min_signal_range_points <= 0 or (high - low) >= min_signal_range_points
+            if body_ok and range_ok and sweep_ok:
+                session.pending_green = {
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "index_ts": timestamp,
+                }
 
         actions: list[str] = []
 
@@ -683,21 +725,43 @@ class LiveLiquidityRunner:
                     else:
                         entry_price = close if require_close_beyond_signal else pending_red["low"]
                         stop_loss = float(prev_row["high"]) if prev_row else pending_red["high"]
-                        target_1 = _points_target(entry_price, "short", partial_target_points)
-                        target_2 = _swing_low_before(daily_rows, day, swing_lookback)
+                        target_1, target_2, reward_points = _liquidity_targets(
+                            "short",
+                            entry_price,
+                            daily_rows,
+                            day,
+                            use_swing_target_for_partial=use_swing_target_for_partial,
+                            partial_target_points=partial_target_points,
+                            swing_lookback=swing_lookback,
+                            runner_swing_lookback=runner_swing_lookback,
+                        )
+                        signal = pending_red
                         if (
-                            _liquidity_entry_valid(
-                                "short",
-                                entry_price,
-                                stop_loss,
-                                partial_target_points,
+                            _passes_liquidity_entry_filters(
+                                side="short",
+                                timestamp=timestamp,
+                                entry_price=entry_price,
+                                stop_loss=stop_loss,
+                                reward_points=reward_points,
+                                daily_rows=daily_rows,
+                                day=day,
                                 min_sl_points=min_sl_points,
                                 max_sl_points=max_sl_points,
                                 min_reward_to_risk=min_reward_to_risk,
                                 max_sl_pct=max_sl_pct,
+                                require_liquidity_sweep=require_liquidity_sweep,
+                                signal_high=signal["high"],
+                                signal_low=signal["low"],
+                                signal_close=_pending_signal_close(signal, "short"),
+                                upper=upper,
+                                lower=lower,
+                                use_daily_trend_filter=use_daily_trend_filter,
+                                use_session_filter=use_session_filter,
+                                session_start_hour_utc=session_start_hour_utc,
+                                session_end_hour_utc=session_end_hour_utc,
                             )
-                            and target_2 > 0
-                            and entry_price > target_2
+                            and target_1 > 0
+                            and entry_price > target_1
                         ):
                             session.trades_in_sequence += 1
                             session.upper_entries_today += 1
@@ -724,21 +788,43 @@ class LiveLiquidityRunner:
                     else:
                         entry_price = close if require_close_beyond_signal else pending_green["high"]
                         stop_loss = float(prev_row["low"]) if prev_row else pending_green["low"]
-                        target_1 = _points_target(entry_price, "long", partial_target_points)
-                        target_2 = _swing_high_before(daily_rows, day, swing_lookback)
+                        target_1, target_2, reward_points = _liquidity_targets(
+                            "long",
+                            entry_price,
+                            daily_rows,
+                            day,
+                            use_swing_target_for_partial=use_swing_target_for_partial,
+                            partial_target_points=partial_target_points,
+                            swing_lookback=swing_lookback,
+                            runner_swing_lookback=runner_swing_lookback,
+                        )
+                        signal = pending_green
                         if (
-                            _liquidity_entry_valid(
-                                "long",
-                                entry_price,
-                                stop_loss,
-                                partial_target_points,
+                            _passes_liquidity_entry_filters(
+                                side="long",
+                                timestamp=timestamp,
+                                entry_price=entry_price,
+                                stop_loss=stop_loss,
+                                reward_points=reward_points,
+                                daily_rows=daily_rows,
+                                day=day,
                                 min_sl_points=min_sl_points,
                                 max_sl_points=max_sl_points,
                                 min_reward_to_risk=min_reward_to_risk,
                                 max_sl_pct=max_sl_pct,
+                                require_liquidity_sweep=require_liquidity_sweep,
+                                signal_high=signal["high"],
+                                signal_low=signal["low"],
+                                signal_close=_pending_signal_close(signal, "long"),
+                                upper=upper,
+                                lower=lower,
+                                use_daily_trend_filter=use_daily_trend_filter,
+                                use_session_filter=use_session_filter,
+                                session_start_hour_utc=session_start_hour_utc,
+                                session_end_hour_utc=session_end_hour_utc,
                             )
-                            and target_2 > 0
-                            and entry_price < target_2
+                            and target_1 > 0
+                            and entry_price < target_1
                         ):
                             session.trades_in_sequence += 1
                             session.lower_entries_today += 1

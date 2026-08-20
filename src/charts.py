@@ -13,6 +13,7 @@ def _group_trade_entries(trades: list[Trade]) -> list[dict]:
     entries: list[dict] = []
     for (entry_date, entry_price), legs in sorted(groups.items()):
         lot_points = sum(leg.points * leg.lots for leg in legs)
+        pnl_usd = sum(leg.pnl_usd for leg in legs)
         entries.append(
             {
                 "entry_date": entry_date,
@@ -20,6 +21,7 @@ def _group_trade_entries(trades: list[Trade]) -> list[dict]:
                 "exit_date": max(leg.exit_date for leg in legs),
                 "exit_price": legs[-1].exit_price,
                 "lot_points": round(lot_points, 2),
+                "pnl_usd": round(pnl_usd, 2),
                 "legs": len(legs),
                 "side": "long" if lot_points >= 0 and any(l.points > 0 for l in legs) else "short",
             }
@@ -132,32 +134,32 @@ def render_cumulative_pnl_chart(backtest: BacktestResult) -> str:
     cumulative: list[float] = []
     running = 0.0
     for entry in entries:
-        running += entry["lot_points"]
+        running += entry["pnl_usd"]
         cumulative.append(running)
     return _svg_line_chart(
         cumulative,
         stroke="#9467bd",
-        title="Cumulative P&L (lot-points)",
-        y_suffix=" pts",
+        title="Cumulative P&L (USD)",
+        y_suffix="",
     )
 
 
 def render_trade_pnl_bars(backtest: BacktestResult) -> str:
     entries = _group_trade_entries(backtest.trades)
     labels = [entry["entry_date"][:10] for entry in entries]
-    values = [entry["lot_points"] for entry in entries]
+    values = [entry["pnl_usd"] for entry in entries]
     return _svg_bar_chart(
         labels,
         values,
-        title="P&L per entry (lot-points) — green = win, red = loss",
+        title="P&L per entry (USD) — green = win, red = loss",
     )
 
 
 def render_win_loss_summary(backtest: BacktestResult) -> str:
     entries = _group_trade_entries(backtest.trades)
-    wins = sum(1 for entry in entries if entry["lot_points"] > 0)
-    losses = sum(1 for entry in entries if entry["lot_points"] < 0)
-    breakeven = sum(1 for entry in entries if entry["lot_points"] == 0)
+    wins = sum(1 for entry in entries if entry["pnl_usd"] > 0)
+    losses = sum(1 for entry in entries if entry["pnl_usd"] < 0)
+    breakeven = sum(1 for entry in entries if entry["pnl_usd"] == 0)
     total = max(len(entries), 1)
 
     segments: list[tuple[int, str, str]] = [

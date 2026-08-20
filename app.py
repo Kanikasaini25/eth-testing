@@ -62,9 +62,15 @@ def _results_table(results: list[BacktestResult]) -> list[dict]:
     ]
 
 
-def _trades_table(result: BacktestResult) -> list[dict]:
+def _format_usd(amount: float) -> str:
+    return f"${amount:+,.2f}"
+
+
+def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
     rows: list[dict] = []
     for trade in result.trades:
+        pnl_usd = trade.pnl_usd
+        lot_points = round(trade.points * trade.lots, 2)
         rows.append(
             {
                 "Trade": trade.trade_type or _trade_type_from_side(trade.side),
@@ -75,11 +81,60 @@ def _trades_table(result: BacktestResult) -> list[dict]:
                 "Entry Lots": trade.entry_lots,
                 "Exit Lots": trade.lots,
                 "Points": trade.points,
+                "P/L ($)": _format_usd(pnl_usd),
+                "P/L (lot-pts)": lot_points,
                 "Return %": trade.return_pct,
-                "Wallet (USD)": trade.wallet_balance,
+                "Wallet": _format_usd(trade.wallet_balance),
                 "Exit Reason": trade.exit_reason,
             }
         )
+    return rows
+
+
+def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, float | int]:
+    total_lot_points = sum(trade.points * trade.lots for trade in result.trades)
+    total_pnl_usd = sum(trade.pnl_usd for trade in result.trades)
+    final_wallet = result.trades[-1].wallet_balance if result.trades else starting_wallet
+    net_usd = round(final_wallet - starting_wallet, 2)
+    wins = losses = 0
+    for trade in result.trades:
+        if trade.pnl_usd > 0:
+            wins += 1
+        elif trade.pnl_usd < 0:
+            losses += 1
+    return {
+        "total_lot_points": round(total_lot_points, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "net_usd": net_usd,
+        "final_wallet": round(final_wallet, 2),
+        "wins": wins,
+        "losses": losses,
+        "exits": len(result.trades),
+    }
+
+
+def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> list[dict]:
+    rows = _trades_table(result, starting_wallet)
+    if not rows:
+        return rows
+    totals = _trades_totals(result, starting_wallet)
+    rows.append(
+        {
+            "Trade": "TOTAL",
+            "Entry": "",
+            "Exit": "",
+            "Entry Price": "",
+            "Exit Price": "",
+            "Entry Lots": "",
+            "Exit Lots": "",
+            "Points": "",
+            "P/L ($)": _format_usd(totals["net_usd"]),
+            "P/L (lot-pts)": totals["total_lot_points"],
+            "Return %": "",
+            "Wallet": _format_usd(totals["final_wallet"]),
+            "Exit Reason": "",
+        }
+    )
     return rows
 
 
@@ -333,7 +388,7 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
     st.caption(
         f"Runs the same liquidity strategy as backtest on **{env_label}**. "
-        f"100 lots entry · 80 partial @ +5 pts · 20 runner with trailing stop."
+        f"100 lots entry · 80 partial @ +15 pts · 20 runner with 3 pt trail."
     )
 
     rules_path = default_rules_path()
@@ -568,18 +623,38 @@ def _render_backtest_page(settings: dict) -> None:
                     unsafe_allow_html=True,
                 )
                 st.caption(
-                    "Lot-points = points × lots (e.g. 80 lots × 10 pts = 800). "
+                    "P/L charts use net USD (100 lots = 1 ETH → ~$1 per $1 ETH move, fees included). "
                     "Blue dot = entry, green/red dot = exit."
                 )
 
     with tab_trades:
         st.subheader("Trade Log")
+        starting_wallet = settings["starting_wallet_usd"]
         for backtest in result.results:
             with st.expander(f"{backtest.rule_name} ({len(backtest.trades)} exits)", expanded=True):
                 if backtest.trades:
-                    st.dataframe(_trades_table(backtest), use_container_width=True)
-                    last_wallet = backtest.trades[-1].wallet_balance
-                    st.caption(f"Final wallet balance: **${last_wallet:,.2f}**")
+                    totals = _trades_totals(backtest, starting_wallet)
+                    st.dataframe(
+                        _trades_table_with_total(backtest, starting_wallet),
+                        use_container_width=True,
+                    )
+                    pnl_col1, pnl_col2, pnl_col3, pnl_col4 = st.columns(4)
+                    pnl_col1.metric(
+                        "Total P/L",
+                        _format_usd(totals["net_usd"]),
+                        help=f"Net profit/loss vs starting {_format_usd(starting_wallet)}",
+                    )
+                    pnl_col2.metric(
+                        "Final wallet",
+                        _format_usd(totals["final_wallet"]),
+                    )
+                    pnl_col3.metric("Winning exits", totals["wins"])
+                    pnl_col4.metric("Losing exits", totals["losses"])
+                    st.caption(
+                        f"Starting wallet: **{_format_usd(starting_wallet)}** → "
+                        f"Final: **{_format_usd(totals['final_wallet'])}** · "
+                        f"**P/L ($)** = net USD per exit (price move × ETH size − entry/exit fees)"
+                    )
                 else:
                     st.write("No trades generated.")
 

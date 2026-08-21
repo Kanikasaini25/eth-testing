@@ -219,5 +219,5 @@ def send_runner_exit_email(
 def send_test_email() -> EmailResult:
     return send_email(
         subject="LQDTY Strategy — Test Email",
-        body="This is a test email from your YouTube Strategy Backtester live alerts.",
+        body="This is a test email from your LQDTY live strategy alerts.",
     )

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.backtest import (
+from src.liquidity import (
     FIXED_ENTRY_LOTS,
     PARTIAL_EXIT_LOTS,
     RUNNER_LOTS,

@@ -1,43 +1,17 @@
 from __future__ import annotations
 
-import csv
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import requests
 
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
-CANDLES_PER_DAY_1M = 1440
-MAX_BACKTEST_DAYS = 365
 
 RESOLUTION_SECONDS: dict[str, int] = {
     "1m": 60,
-    "3m": 180,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
-    "2h": 7200,
-    "4h": 14400,
-    "6h": 21600,
     "1d": 86400,
 }
-
-
-def expected_1m_candles(days: int) -> int:
-    """One trading day on 1m timeframe = 1440 candles (24 × 60)."""
-    return max(days, 0) * CANDLES_PER_DAY_1M
-
-
-def trim_ohlcv_to_days(rows: list[dict], days: int, resolution: str = "1m") -> list[dict]:
-    if not rows or resolution != "1m":
-        return rows
-    expected = expected_1m_candles(days)
-    if len(rows) > expected:
-        return rows[-expected:]
-    return rows
 
 
 class DeltaExchangeClient:
@@ -73,7 +47,7 @@ class DeltaExchangeClient:
         self,
         symbol: str,
         resolution: str = "1d",
-        days: int = 730,
+        days: int = 30,
     ) -> list[dict]:
         end = int(time.time())
         start = end - (days * SECONDS_PER_DAY)
@@ -96,14 +70,12 @@ class DeltaExchangeClient:
             chunk_end = earliest - 1
             time.sleep(0.15)
 
-        candles = all_candles
-
-        if not candles:
+        if not all_candles:
             raise RuntimeError(f"No candle data returned for {symbol}")
 
         rows: list[dict] = []
         seen: set[int] = set()
-        for candle in sorted(candles, key=lambda item: item["time"]):
+        for candle in sorted(all_candles, key=lambda item: item["time"]):
             ts = candle["time"]
             if ts in seen:
                 continue
@@ -120,17 +92,3 @@ class DeltaExchangeClient:
             )
 
         return rows
-
-
-def save_ohlcv(rows: list[dict], path: str) -> None:
-    if not rows:
-        return
-    with Path(path).open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def load_ohlcv(path: str) -> list[dict]:
-    with Path(path).open(encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))

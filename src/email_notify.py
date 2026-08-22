@@ -92,15 +92,15 @@ def send_entry_signal_email(
 
     body = "\n".join(
         [
-            "LQDTY Liquidity Strategy — Entry Signal",
+            "15m Liquidity Grab — Entry Signal",
             "",
             f"Symbol:      {symbol}",
             f"Signal:      {trade_label}",
             f"Entry time:  {entry_ts}",
             f"Entry price: {entry_price:.2f}",
             f"Stop loss:   {stop_loss:.2f}",
-            f"Target 1:    {target_1:.2f} (partial {partial_lots} lots @ +5 pts)",
-            f"Target 2:    {target_2:.2f} (runner {runner_lots} lots swing target)",
+            f"Target 1:    {target_1:.2f}",
+            f"Target 2:    {target_2:.2f}",
             f"Size:        {entry_lots} lots",
             f"Liquidity:   {entry_line} line",
             "",
@@ -211,6 +211,37 @@ def send_runner_exit_email(
             f"Exit price:   {exit_price:.2f}",
             f"Runner lots:  {runner_lots}",
             f"Points:       {points:.2f}",
+        ]
+    )
+    return send_email(subject, body)
+
+
+def send_take_profit_email(
+    *,
+    symbol: str,
+    side: str,
+    entry_price: float,
+    exit_price: float,
+    lots: int,
+    target: float,
+) -> EmailResult:
+    trade_label = "LONG" if side == "long" else "SHORT"
+    points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+    subject = f"LQDTY Take Profit: {lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
+
+    body = "\n".join(
+        [
+            "15m Liquidity Grab — Take Profit",
+            "",
+            f"Symbol:       {symbol}",
+            f"Side:         {trade_label}",
+            f"Entry price:  {entry_price:.2f}",
+            f"Target:       {target:.2f}",
+            f"Exit price:   {exit_price:.2f}",
+            f"Lots closed:  {lots}",
+            f"Points:       {points:.2f}",
+            "",
+            "Full position closed on Delta Exchange.",
         ]
     )
     return send_email(subject, body)

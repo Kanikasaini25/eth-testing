@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run LQDTY live strategy on Delta demo/live account."""
+"""Run 15m liquidity-grab live strategy on Delta demo/live account."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from src.live_strategy import LiveLiquidityRunner
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run LQDTY live strategy")
+    parser = argparse.ArgumentParser(description="Run 15m liquidity-grab live strategy")
     parser.add_argument("--once", action="store_true", help="Run a single tick and exit")
     parser.add_argument("--loop", action="store_true", help="Run continuously every N seconds")
     parser.add_argument("--interval", type=int, default=60, help="Seconds between ticks")
@@ -32,7 +32,7 @@ def main() -> int:
         if not result.success:
             print(f"Tick FAILED: {result.error}")
             return 1
-        print(f"Mark: {result.mark_price} | Upper: {result.upper_level} | Lower: {result.lower_level}")
+        print(f"Mark: {result.mark_price} | Swing High: {result.upper_level} | Swing Low: {result.lower_level}")
         print(f"Position: {result.exchange_position} lots | Tracked: {result.in_position}")
         for action in result.actions:
             print(f"  - {action}")

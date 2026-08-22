@@ -13,7 +13,7 @@
     "lower_entries_today": 0,
     "upper_line_blocked": true,
     "lower_line_blocked": false,
-    "last_processed_ts": "2026-08-21T08:34:00+00:00"
+    "last_processed_ts": "2026-08-21T09:33:00+00:00"
   },
   "position": null,
   "upper_level": 2358.85,
@@ -23,6 +23,7 @@
     "[2026-08-21 08:32:00 UTC] ENTER SHORT 100 lots @ ~2379.55, SL 2394.87",
     "[2026-08-21 08:32:06 UTC] Email sent: Email sent to sudhanshusitole0@gmail.com",
     "[2026-08-21 08:33:11 UTC] Position closed on exchange @ ~2394.95",
-    "[2026-08-21 08:33:16 UTC] Email sent: Email sent to sudhanshusitole0@gmail.com"
+    "[2026-08-21 08:33:16 UTC] Email sent: Email sent to sudhanshusitole0@gmail.com",
+    "[2026-08-21 09:33:57 UTC] Strategy ENABLED"
   ]
 }

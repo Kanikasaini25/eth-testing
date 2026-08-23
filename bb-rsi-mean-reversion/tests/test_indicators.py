@@ -1,18 +1,28 @@
 import unittest
+from datetime import datetime, timezone
 
-from src.indicators import bollinger_bands, rsi_cutler, sma, snapshot
-from src.strategy import evaluate_closed_candle, previous_hour_trend
+from src.indicators import bollinger_bands, rsi_cutler, sma
+from src.strategy import evaluate_closed_candle
 
 
-def _bar(index: int, price: float, wick: float = 0.2) -> dict:
-    minute = index % 60
-    hour = index // 60
+def _bar(
+    hour: int,
+    minute: int,
+    *,
+    open_px: float,
+    close_px: float,
+    low: float | None = None,
+    high: float | None = None,
+) -> dict:
+    wick_high = max(open_px, close_px) + 0.2 if high is None else high
+    wick_low = min(open_px, close_px) - 0.2 if low is None else low
+    stamp = datetime(2026, 8, 3, hour, minute, tzinfo=timezone.utc)
     return {
-        "timestamp": f"2026-08-22T{hour:02d}:{minute:02d}:00+00:00",
-        "open": price + 0.1,
-        "high": price + wick,
-        "low": price - wick,
-        "close": price,
+        "timestamp": stamp.isoformat(),
+        "open": open_px,
+        "high": wick_high,
+        "low": wick_low,
+        "close": close_px,
         "volume": 1.0,
     }
 
@@ -42,64 +52,84 @@ class IndicatorTests(unittest.TestCase):
         closes = [float(index) for index in range(16, 0, -1)]
         self.assertEqual(rsi_cutler(closes, period=14), 0.0)
 
-    def test_long_signal_requires_lower_band_and_rsi(self) -> None:
-        candles = [_bar(index, 100.0) for index in range(60)]
-        candles.append(_bar(60, 90.0, wick=1.0))
-        signal = evaluate_closed_candle(candles)
-        snap = snapshot([float(row["close"]) for row in candles])
-        self.assertIsNotNone(snap)
-        assert snap is not None
-        self.assertLess(snap.rsi, 30)
-        last = candles[-1]
-        self.assertTrue(last["close"] <= snap.lower_band or last["low"] <= snap.lower_band)
+
+class SessionPatternTests(unittest.TestCase):
+    def test_london_two_reds_go_short_with_first_candle_high_stop(self) -> None:
+        first = _bar(7, 0, open_px=100.0, close_px=99.4, low=99.2, high=100.3)
+        second = _bar(7, 1, open_px=99.4, close_px=98.5, low=98.4)
+        signal = evaluate_closed_candle([first, second])
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.side, "short")
+        self.assertEqual(signal.session, "LONDON")
+        self.assertEqual(signal.stop_price, 100.3)
+
+    def test_london_short_stop_is_first_red_high_not_low(self) -> None:
+        first = _bar(7, 0, open_px=1906.50, close_px=1905.50, low=1905.05, high=1907.10)
+        second = _bar(7, 1, open_px=1905.50, close_px=1904.80, low=1904.50, high=1905.80)
+        signal = evaluate_closed_candle([first, second])
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.side, "short")
+        self.assertEqual(signal.stop_price, 1907.10)
+
+    def test_london_retry_stop_is_one_tick_above_first_high(self) -> None:
+        first = _bar(7, 0, open_px=100.0, close_px=99.4, low=99.2, high=100.3)
+        second = _bar(7, 1, open_px=99.4, close_px=98.5, low=98.4)
+        signal = evaluate_closed_candle([first, second], after_loss=True)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.side, "short")
+        self.assertEqual(signal.stop_price, 100.35)
+
+    def test_london_skips_without_two_reds(self) -> None:
+        first = _bar(7, 0, open_px=100.0, close_px=100.4)
+        second = _bar(7, 1, open_px=100.4, close_px=99.5, low=99.4)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
+
+    def test_us_two_greens_go_long_with_first_candle_low_stop(self) -> None:
+        first = _bar(13, 30, open_px=100.0, close_px=100.6, low=99.8)
+        second = _bar(13, 31, open_px=100.6, close_px=101.2, low=100.5)
+        signal = evaluate_closed_candle([first, second])
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertEqual(signal.side, "long")
+        self.assertEqual(signal.session, "US")
+        self.assertEqual(signal.stop_price, 99.8)
 
-    def test_short_signal_requires_upper_band_and_rsi(self) -> None:
-        candles = [_bar(index, 100.0 + index * 0.25) for index in range(60)]
-        candles.append(_bar(60, 130.0, wick=1.0))
-        signal = evaluate_closed_candle(candles)
+    def test_us_retry_stop_is_one_tick_below_first_low(self) -> None:
+        first = _bar(13, 30, open_px=100.0, close_px=100.6, low=99.8)
+        second = _bar(13, 31, open_px=100.6, close_px=101.2, low=100.5)
+        signal = evaluate_closed_candle([first, second], after_loss=True)
         self.assertIsNotNone(signal)
         assert signal is not None
-        self.assertEqual(signal.side, "short")
-        self.assertGreater(signal.indicators.rsi, 70)
+        self.assertEqual(signal.side, "long")
+        self.assertEqual(signal.stop_price, 99.75)
 
-    def test_no_signal_when_rsi_not_extreme(self) -> None:
-        candles = []
-        price = 100.0
-        for index in range(30):
-            price += 0.05 if index % 2 == 0 else -0.04
-            candles.append(
-                {
-                    "timestamp": f"2026-08-22T00:{index:02d}:00+00:00",
-                    "open": price,
-                    "high": price + 0.1,
-                    "low": price - 0.1,
-                    "close": price,
-                    "volume": 1.0,
-                }
-            )
-        self.assertIsNone(evaluate_closed_candle(candles))
+    def test_us_skips_without_two_greens(self) -> None:
+        first = _bar(13, 30, open_px=100.0, close_px=99.4, low=99.2)
+        second = _bar(13, 31, open_px=99.4, close_px=100.2, low=99.3)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
 
-    def test_long_is_blocked_after_1h_up_run(self) -> None:
-        candles = [_bar(index, 90.0 + index * 0.4) for index in range(60)]
-        candles.append(_bar(60, 90.0, wick=1.0))
-        trend = previous_hour_trend(candles)
-        self.assertIsNotNone(trend)
-        assert trend is not None
-        self.assertEqual(trend.direction, "up")
-        self.assertIsNone(evaluate_closed_candle(candles))
+    def test_skips_when_bars_are_not_back_to_back(self) -> None:
+        first = _bar(7, 0, open_px=100.0, close_px=99.4, low=99.2)
+        second = _bar(7, 2, open_px=99.4, close_px=98.5, low=98.4)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
 
-    def test_reentry_fades_1h_without_rsi_extreme(self) -> None:
-        candles = [_bar(index, 100.0 + index * 0.2) for index in range(60)]
-        candles.append(_bar(60, 111.0, wick=0.2))
-        self.assertIsNone(evaluate_closed_candle(candles))
-        signal = evaluate_closed_candle(candles, after_session_stop=True)
-        self.assertIsNotNone(signal)
-        assert signal is not None
-        self.assertEqual(signal.side, "short")
-        self.assertIn("re-entry", signal.reason)
+    def test_no_signal_outside_opens(self) -> None:
+        first = _bar(4, 0, open_px=100.0, close_px=99.4, low=99.2)
+        second = _bar(4, 1, open_px=99.4, close_px=98.5, low=98.4)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
+
+    def test_london_two_greens_never_go_long(self) -> None:
+        first = _bar(7, 0, open_px=100.0, close_px=100.6, low=99.8)
+        second = _bar(7, 1, open_px=100.6, close_px=101.2, low=100.5)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
+
+    def test_us_two_reds_never_go_short(self) -> None:
+        first = _bar(13, 30, open_px=100.0, close_px=99.4, low=99.2)
+        second = _bar(13, 31, open_px=99.4, close_px=98.5, low=98.4)
+        self.assertIsNone(evaluate_closed_candle([first, second]))
 
 
 if __name__ == "__main__":

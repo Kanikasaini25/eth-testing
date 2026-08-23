@@ -42,18 +42,17 @@ def scan_line(
     *,
     close: float,
     mark: float,
-    rsi: str,
-    lower: str,
-    upper: str,
     session: str,
     signal: str,
     daily_pnl: float,
     trades_today: int,
     trade_cap: int,
+    reason: str = "",
 ) -> str:
+    extra = f" reason={reason}" if reason else ""
     return (
-        f"scan close={close:.2f} mark={mark:.2f} rsi={rsi} bb=[{lower}, {upper}] "
-        f"session={session} signal={signal} daily_pnl={daily_pnl:+.2f} "
+        f"scan close={close:.2f} mark={mark:.2f} session={session} "
+        f"signal={signal}{extra} daily_pnl={daily_pnl:+.2f} "
         f"trades_today={trades_today}/{trade_cap}"
     )
 

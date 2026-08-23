@@ -20,18 +20,44 @@ def _bar(index: int, price: float, hour: int = 7, wick: float = 0.2) -> dict:
     }
 
 
+def _us_bar(index: int, *, open_px: float, close_px: float, wick: float = 0.2) -> dict:
+    minute = 30 + index
+    hour = 13 + minute // 60
+    minute = minute % 60
+    stamp = datetime(2026, 8, 3, hour, minute, tzinfo=timezone.utc)
+    high = max(open_px, close_px) + wick
+    low = min(open_px, close_px) - wick
+    return {
+        "timestamp": stamp.isoformat(),
+        "open": open_px,
+        "high": high,
+        "low": low,
+        "close": close_px,
+        "volume": 1.0,
+    }
+
+
+def _us_green(index: int, close: float) -> dict:
+    return _us_bar(index, open_px=close - 0.4, close_px=close)
+
+
+def _us_red(index: int, close: float) -> dict:
+    return _us_bar(index, open_px=close + 0.4, close_px=close)
+
+
 def _dump_then_reclaim() -> list[dict]:
     candles = [_bar(index, 100.0) for index in range(WARMUP)]
-    candles.append(_bar(WARMUP, 90.0, wick=1.0))
-    candles.append(_bar(WARMUP + 1, 92.0, wick=0.2))
+    candles.append(_bar(WARMUP, 100.0, wick=0.2))
+    candles.append(_bar(WARMUP + 1, 99.0, wick=0.2))
     return candles
 
 
 class BacktestTests(unittest.TestCase):
-    def test_long_dump_creates_a_trade_at_london_open(self) -> None:
+    def test_bearish_bar_creates_a_short_at_london_open(self) -> None:
         result = run_backtest(_dump_then_reclaim(), symbol="ETHUSD", days=1)
         self.assertGreaterEqual(len(result.trades), 1)
-        self.assertEqual(result.trades[0].side, "long")
+        self.assertEqual(result.trades[0].side, "short")
+        self.assertEqual(result.trades[0].session, "LONDON")
         self.assertEqual(result.trades[0].lots, 100)
         trade = result.trades[0]
         self.assertGreater(trade.entry_fee, 0)
@@ -41,6 +67,18 @@ class BacktestTests(unittest.TestCase):
             trade.gross_pnl - trade.entry_fee - trade.exit_fee,
             places=4,
         )
+
+    def test_us_two_greens_create_a_long(self) -> None:
+        candles = [_us_green(index, 100.0 + index * 0.4) for index in range(4)]
+        result = run_backtest(candles, symbol="ETHUSD", days=1)
+        self.assertGreaterEqual(len(result.trades), 1)
+        self.assertEqual(result.trades[0].side, "long")
+        self.assertEqual(result.trades[0].session, "US")
+
+    def test_us_two_reds_do_not_short(self) -> None:
+        candles = [_us_red(index, 100.0 - index) for index in range(4)]
+        result = run_backtest(candles, symbol="ETHUSD", days=1)
+        self.assertEqual(len(result.trades), 0)
 
     def test_no_entry_outside_london_us_session(self) -> None:
         candles = [_bar(index, 100.0, hour=4) for index in range(WARMUP)]
@@ -89,9 +127,6 @@ def _long_position() -> SimPosition:
         max_profit_price=120.0,
         contract_eth=0.01,
         entry_ts="2026-08-03T03:00:00+00:00",
-        rsi=25.0,
-        lower_band=90.0,
-        upper_band=110.0,
     )
 
 

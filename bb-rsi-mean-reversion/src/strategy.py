@@ -1,106 +1,100 @@
-"""1m close signals: SMA Bollinger + RSI, faded against the previous 1h run."""
+"""London = short only. US = long only. Two same-color 1m bars. No old close-vs-open side."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.config import (
-    BB_PERIOD,
-    BB_STD_DEV,
-    HTF_BARS,
-    RSI_OVERBOUGHT,
-    RSI_OVERSOLD,
-    RSI_PERIOD,
-)
-from src.indicators import IndicatorSnapshot, snapshot
+from src.risk import round_to_tick
+from src.session import is_london_open, is_us_open, parse_bar_time
 
-
-@dataclass(frozen=True)
-class HourTrend:
-    direction: str
-    open: float
-    close: float
+STRATEGY_ID = "LONDON_SHORT_US_LONG"
+STOP_TICK = 0.05
 
 
 @dataclass(frozen=True)
 class Signal:
     side: str
     reason: str
-    indicators: IndicatorSnapshot
     candle: dict
-
-
-def previous_hour_trend(candles: list[dict]) -> HourTrend | None:
-    """OHLC of the 60 1m bars before the signal candle."""
-    if len(candles) < HTF_BARS + 1:
-        return None
-    window = candles[-(HTF_BARS + 1) : -1]
-    hour_open = float(window[0]["open"])
-    hour_close = float(window[-1]["close"])
-    if hour_close < hour_open:
-        direction = "down"
-    elif hour_close > hour_open:
-        direction = "up"
-    else:
-        direction = "flat"
-    return HourTrend(direction, hour_open, hour_close)
+    stop_price: float
+    session: str
 
 
 def evaluate_closed_candle(
-    candles: list[dict], *, after_session_stop: bool = False
+    candles: list[dict],
+    *,
+    after_loss: bool = False,
+    **_: object,
 ) -> Signal | None:
-    if not candles:
+    pair = _consecutive_pair(candles)
+    if pair is None:
         return None
-    trend = previous_hour_trend(candles)
-    if trend is None or trend.direction == "flat":
-        return None
-    closes = [float(row["close"]) for row in candles]
-    indicators = snapshot(
-        closes,
-        bb_period=BB_PERIOD,
-        bb_std=BB_STD_DEV,
-        rsi_period=RSI_PERIOD,
-    )
-    if indicators is None:
-        return None
-    candle = candles[-1]
-    if after_session_stop:
-        return _fade_hour_signal(trend, indicators, candle)
-    return _bb_rsi_signal(trend, indicators, candle)
-
-
-def _bb_rsi_signal(
-    trend: HourTrend, indicators: IndicatorSnapshot, candle: dict
-) -> Signal | None:
-    high = float(candle["high"])
-    low = float(candle["low"])
-    close = float(candle["close"])
-    long_ok = _long_entry(low, close, indicators) and trend.direction == "down"
-    short_ok = _short_entry(high, close, indicators) and trend.direction == "up"
-    if long_ok and short_ok:
-        return None
-    if long_ok:
-        return Signal("long", "fade 1h down run + lower BB + RSI < 30", indicators, candle)
-    if short_ok:
-        return Signal("short", "fade 1h up run + upper BB + RSI > 70", indicators, candle)
+    first, second = pair
+    first_time = parse_bar_time(first["timestamp"])
+    second_time = parse_bar_time(second["timestamp"])
+    if is_london_open(first_time) and is_london_open(second_time):
+        return _london_short(first, second, after_loss)
+    if is_us_open(first_time) and is_us_open(second_time):
+        return _us_long(first, second, after_loss)
     return None
 
 
-def _fade_hour_signal(
-    trend: HourTrend, indicators: IndicatorSnapshot, candle: dict
-) -> Signal | None:
-    if trend.direction == "down":
-        return Signal("long", "re-entry fade 1h down run", indicators, candle)
-    if trend.direction == "up":
-        return Signal("short", "re-entry fade 1h up run", indicators, candle)
-    return None
+def _london_short(first: dict, second: dict, after_loss: bool) -> Signal | None:
+    if not (_is_red(first) and _is_red(second)):
+        return None
+    stop = _stop_from_first_high(first, after_loss)
+    reason = "London 2 red 1m"
+    if after_loss:
+        reason += " (retry SL above first high)"
+    return _build("short", reason, second, stop, "LONDON")
 
 
-def _long_entry(low: float, close: float, indicators: IndicatorSnapshot) -> bool:
-    pierced = close <= indicators.lower_band or low <= indicators.lower_band
-    return pierced and indicators.rsi < RSI_OVERSOLD
+def _us_long(first: dict, second: dict, after_loss: bool) -> Signal | None:
+    if not (_is_green(first) and _is_green(second)):
+        return None
+    stop = _stop_from_first_low(first, after_loss)
+    reason = "US 2 green 1m"
+    if after_loss:
+        reason += " (retry SL below first low)"
+    return _build("long", reason, second, stop, "US")
 
 
-def _short_entry(high: float, close: float, indicators: IndicatorSnapshot) -> bool:
-    pierced = close >= indicators.upper_band or high >= indicators.upper_band
-    return pierced and indicators.rsi > RSI_OVERBOUGHT
+def _stop_from_first_high(first: dict, after_loss: bool) -> float:
+    high = float(first["high"])
+    if after_loss:
+        return round_to_tick(high + STOP_TICK, STOP_TICK)
+    return round_to_tick(high, STOP_TICK)
+
+
+def _stop_from_first_low(first: dict, after_loss: bool) -> float:
+    low = float(first["low"])
+    if after_loss:
+        return round_to_tick(low - STOP_TICK, STOP_TICK)
+    return round_to_tick(low, STOP_TICK)
+
+
+def _build(side: str, reason: str, entry_candle: dict, stop: float, session: str) -> Signal | None:
+    entry = float(entry_candle["close"])
+    if side == "long" and stop >= entry:
+        return None
+    if side == "short" and stop <= entry:
+        return None
+    return Signal(side, reason, entry_candle, stop, session)
+
+
+def _consecutive_pair(candles: list[dict]) -> tuple[dict, dict] | None:
+    if len(candles) < 2:
+        return None
+    first, second = candles[-2], candles[-1]
+    gap = parse_bar_time(second["timestamp"]) - parse_bar_time(first["timestamp"])
+    if abs(gap.total_seconds() - 60) > 1:
+        return None
+    return first, second
+
+
+def _is_red(candle: dict) -> bool:
+    return float(candle["close"]) < float(candle["open"])
+
+
+def _is_green(candle: dict) -> bool:
+    return float(candle["close"]) > float(candle["open"])

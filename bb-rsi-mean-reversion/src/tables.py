@@ -36,10 +36,12 @@ def _trade_row(index: int, trade: Trade) -> dict:
     return {
         "#": index,
         "Side": trade.side.upper(),
+        "Session": trade.session,
         "Entry": format_ist_clock(trade.entry_ts),
         "Exit": format_ist_clock(trade.exit_ts),
         "Entry OHLC": _ohlc(trade),
         "Entry $": round(trade.entry_price, 2),
+        "SL $": round(trade.stop_price, 2),
         "Exit $": round(trade.exit_price, 2),
         "Lots": trade.lots,
         "Points": round(trade.points, 2),
@@ -48,7 +50,6 @@ def _trade_row(index: int, trade: Trade) -> dict:
         "Exit fee": format_fee(trade.exit_fee),
         "Net P/L": format_usd(trade.pnl_usd),
         "Wallet": format_usd(trade.wallet_balance),
-        "RSI": trade.rsi,
         "Reason": trade.exit_reason,
     }
 
@@ -57,10 +58,12 @@ def _grand_total_row(result: BacktestResult) -> dict:
     return {
         "#": "",
         "Side": "GRAND TOTAL",
+        "Session": "",
         "Entry": "",
         "Exit": "",
         "Entry OHLC": "",
         "Entry $": "",
+        "SL $": "",
         "Exit $": "",
         "Lots": sum(trade.lots for trade in result.trades),
         "Points": round(sum(trade.points for trade in result.trades), 2),
@@ -69,7 +72,6 @@ def _grand_total_row(result: BacktestResult) -> dict:
         "Exit fee": format_fee(sum(trade.exit_fee for trade in result.trades)),
         "Net P/L": format_usd(result.total_pnl),
         "Wallet": format_usd(result.final_wallet),
-        "RSI": "",
         "Reason": f"{result.wins}W / {result.losses}L",
     }
 

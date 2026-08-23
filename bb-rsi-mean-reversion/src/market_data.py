@@ -1,22 +1,17 @@
-"""Public historical 1m candles for backtests. No API keys required."""
+"""Public historical 1m candles for backtests. No API keys required. Never cached."""
 
 from __future__ import annotations
 
-import csv
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
-from src.config import STATE_DIR
 from src.errors import DeltaAPIError
 from src.http import DeltaHttp
-from src.session import utc_day
 
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
 CANDLES_PER_DAY_1M = 1440
-OHLCV_DIR = STATE_DIR / "ohlcv"
 
 
 ProgressFn = Callable[[str], None]
@@ -24,11 +19,6 @@ ProgressFn = Callable[[str], None]
 
 def expected_1m_candles(days: int) -> int:
     return max(days, 0) * CANDLES_PER_DAY_1M
-
-
-def _cache_path(symbol: str, days: int, base_url: str) -> Path:
-    host = base_url.replace("https://", "").replace("http://", "").replace("/", "_")
-    return OHLCV_DIR / f"{symbol}_1m_{days}d_{utc_day()}_{host}.csv"
 
 
 def _rows_from_raw(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -52,38 +42,13 @@ def _rows_from_raw(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def save_ohlcv(rows: list[dict[str, Any]], path: Path) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def load_ohlcv(path: Path) -> list[dict[str, Any]]:
-    with path.open(encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
 def fetch_historical_1m(
     *,
     symbol: str,
     days: int,
     base_url: str,
-    use_cache: bool = True,
     progress: ProgressFn | None = None,
 ) -> list[dict[str, Any]]:
-    OHLCV_DIR.mkdir(parents=True, exist_ok=True)
-    cache = _cache_path(symbol, days, base_url)
-    if use_cache and cache.exists():
-        if progress:
-            progress(f"Loaded cached 1m candles from {cache.name}")
-        rows = load_ohlcv(cache)
-        expected = expected_1m_candles(days)
-        return rows[-expected:] if len(rows) > expected else rows
-
     http = DeltaHttp(base_url)
     end = int(time.time())
     start = end - (days * SECONDS_PER_DAY)
@@ -121,5 +86,4 @@ def fetch_historical_1m(
     expected = expected_1m_candles(days)
     if len(rows) > expected:
         rows = rows[-expected:]
-    save_ohlcv(rows, cache)
     return rows

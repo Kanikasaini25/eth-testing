@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from src.backtest import BacktestResult, Trade
-from src.indicators import indicator_series
 from src.session import format_ist_clock
 
 
@@ -143,39 +142,22 @@ def render_win_loss(result: BacktestResult) -> str:
 
 
 def render_price_with_bands(ohlcv: list[dict]) -> str:
-    window, indices = downsample(ohlcv)
-    closes = [float(row["close"]) for row in ohlcv]
-    series = indicator_series(closes)
+    window, _indices = downsample(ohlcv)
     plot_close = [float(row["close"]) for row in window]
-    plot_sma = [series["sma"][index] for index in indices]
-    plot_upper = [series["upper"][index] for index in indices]
-    plot_lower = [series["lower"][index] for index in indices]
-    numeric = [value for value in plot_close + plot_sma + plot_upper + plot_lower if value is not None]
-    if not numeric:
+    if not plot_close:
         return "<p>No price data.</p>"
     return _multi_line(
-        [plot_close, _filled(plot_sma), _filled(plot_upper), _filled(plot_lower)],
-        colors=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"],
-        title="Price + SMA Bollinger (20, 2.0) — blue close, orange SMA, green/red bands",
+        [plot_close],
+        colors=["#1f77b4"],
+        title="Price (1m close)",
         y_prefix="$",
         caption=_ist_caption(window),
     )
 
 
 def render_rsi_chart(ohlcv: list[dict]) -> str:
-    window, indices = downsample(ohlcv)
-    closes = [float(row["close"]) for row in ohlcv]
-    series = indicator_series(closes)
-    rsi_vals = [_filled_one(series["rsi"][index], 50.0) for index in indices]
-    return _multi_line(
-        [rsi_vals],
-        colors=["#8c564b"],
-        title="Cutler RSI(14) — SMA of gains/losses, no EMA",
-        y_min=0,
-        y_max=100,
-        guides=[(30, "#2ca02c"), (70, "#d62728")],
-        caption=_ist_caption(window),
-    )
+    _ = ohlcv
+    return "<p>RSI is not used in this strategy.</p>"
 
 
 def render_trades_on_price(ohlcv: list[dict], trades: list[Trade]) -> str:

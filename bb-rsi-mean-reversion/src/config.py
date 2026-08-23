@@ -18,14 +18,7 @@ TESTNET_WS_URL = "wss://socket-ind.testnet.deltaex.org"
 PROD_INDIA_REST_URL = "https://api.india.delta.exchange"
 PROD_INDIA_WS_URL = "wss://socket.india.delta.exchange"
 
-# Mean-reversion rules (SMA only — never EMA)
-BB_PERIOD = 20
-BB_STD_DEV = 2.0
-RSI_PERIOD = 14
-RSI_OVERSOLD = 30.0
-RSI_OVERBOUGHT = 70.0
-# Fade the last 60 1m bars (previous 1h run) at the open.
-HTF_BARS = 60
+# London shorts on 2 red 1m bars, SL = first red high. US longs on 2 green 1m bars, SL = first green low.
 
 # India clock. New entries only at session opens (not the full London/US day).
 # London open 12:30–2:00 PM IST. US/NYSE open 7:00–9:30 PM IST.

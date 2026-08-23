@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streamlit backtester for the isolated ETH SMA Bollinger + RSI strategy."""
+"""Streamlit backtester for the isolated ETH session-open strategy."""
 
 from __future__ import annotations
 
@@ -11,6 +11,18 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR))
 
+import importlib
+
+import src.backtest as backtest_mod
+import src.session as session_mod
+import src.strategy as strategy_mod
+import src.tables as tables_mod
+
+importlib.reload(session_mod)
+importlib.reload(strategy_mod)
+importlib.reload(backtest_mod)
+importlib.reload(tables_mod)
+
 import streamlit as st
 
 from src.backtest import BacktestConfig, BacktestResult, run_backtest
@@ -18,7 +30,6 @@ from src.charts import (
     render_cumulative_pnl,
     render_equity_chart,
     render_price_with_bands,
-    render_rsi_chart,
     render_trade_pnl_bars,
     render_trades_on_price,
     render_win_loss,
@@ -38,9 +49,10 @@ from src.config import (
 from src.market_data import expected_1m_candles, fetch_historical_1m
 from src.risk import trade_risk_reward
 from src.session import format_ist_clock
+from src.strategy import STRATEGY_ID
 from src.tables import daily_rows, format_usd, trade_rows
 
-st.set_page_config(page_title="BB + RSI Backtest", page_icon="📉", layout="wide")
+st.set_page_config(page_title="ETH Session Open Backtest", page_icon="📉", layout="wide")
 
 EXCHANGES = {
     "India Live (recommended for history)": "https://api.india.delta.exchange",
@@ -50,10 +62,10 @@ EXCHANGES = {
 
 
 def main() -> None:
-    st.title("ETH BB + RSI Mean Reversion Backtest")
+    st.title("ETH Session Open Backtest")
     st.caption(
-        "1m SMA Bollinger (20, 2.0) + Cutler RSI(14). Entries at London/US open only. "
-        "Isolated from the LQDTY live bot."
+        f"**{STRATEGY_ID}** — London is SHORT only (2 red 1m). US is LONG only (2 green 1m). "
+        "Isolated from the LQDTY live bot. Restart Streamlit if mixed sides still appear."
     )
     settings = _sidebar()
     if settings["run"]:
@@ -76,7 +88,6 @@ def _sidebar() -> dict:
     days = st.sidebar.slider("Days of 1m history", min_value=1, max_value=30, value=7)
     st.sidebar.caption(f"{days} days ≈ **{expected_1m_candles(days):,}** 1m candles")
     wallet = st.sidebar.number_input("Starting wallet (USD)", min_value=100.0, value=10_000.0, step=100.0)
-    use_cache = st.sidebar.checkbox("Use cached candles", value=True)
     with st.sidebar.expander("Risk (strategy defaults)"):
         cap = st.number_input("Daily trade cap", min_value=1, max_value=20, value=DAILY_TRADE_CAP)
         stop_usd = st.number_input("Per-trade stop ($)", min_value=0.5, value=float(PER_TRADE_STOP_USD), step=0.5)
@@ -104,13 +115,13 @@ def _sidebar() -> dict:
             help="Charged on entry notional and exit notional. India taker is typically 0.05%.",
         )
     run = st.sidebar.button("Run backtest", type="primary", use_container_width=True)
+    st.sidebar.caption("Every run downloads fresh 1m candles from Delta. Nothing is cached.")
     return {
         "run": run,
         "base_url": base_url,
         "symbol": symbol,
         "days": days,
         "wallet": wallet,
-        "use_cache": use_cache,
         "config": BacktestConfig(
             starting_wallet=wallet,
             daily_trade_cap=int(cap),
@@ -135,7 +146,6 @@ def _run(settings: dict) -> None:
                 symbol=settings["symbol"],
                 days=settings["days"],
                 base_url=settings["base_url"],
-                use_cache=settings["use_cache"],
                 progress=status.write,
             )
         status.write(f"Running backtest on {len(candles):,} candles...")
@@ -198,8 +208,7 @@ def _charts(result: BacktestResult, candles: list[dict]) -> None:
     st.markdown(render_trade_pnl_bars(result), unsafe_allow_html=True)
     if candles:
         st.markdown(render_trades_on_price(candles, result.trades), unsafe_allow_html=True)
-        st.markdown(render_rsi_chart(candles), unsafe_allow_html=True)
-    st.caption("Blue = entry, green = winning exit, red = losing exit. RSI uses SMA Cutler, not EMA.")
+    st.caption("Blue = entry, green = winning exit, red = losing exit.")
 
 
 def _delta_chart(result: BacktestResult, candles: list[dict]) -> None:
@@ -232,6 +241,8 @@ def _rr_table(trades: list) -> None:
                 "#": f"T{idx}",
                 "Side": trade.side.upper(),
                 "Entry IST": format_ist_clock(trade.entry_ts),
+                "Entry $": round(trade.entry_price, 2),
+                "SL $": round(trade.stop_price, 2),
                 "R:R": f"1 : {rr['ratio']:.2f}",
                 "Risk": f"${rr['risk_usd']:.2f}",
                 "Reward": f"${rr['reward_usd']:.2f}",
@@ -271,7 +282,8 @@ def _trades(result: BacktestResult) -> None:
         return
     st.dataframe(trade_rows(result), use_container_width=True, hide_index=True)
     st.caption(
-        "All times are IST. Entry $ is the 1m close. Match Entry time + Entry OHLC with the Delta India chart."
+        "All times are IST. **London = SHORT**, **US = LONG**. "
+        "Entry $ is the 1m close. Match Entry time + Entry OHLC with the Delta India chart."
     )
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("GRAND TOTAL net P/L", format_usd(result.total_pnl))
@@ -300,16 +312,16 @@ def _daily(result: BacktestResult) -> None:
 def _rules_help() -> None:
     st.markdown(
         """
-        ### Rules used
-        - Long: 1m close/pierce of the **lower SMA Bollinger** and RSI < 30
-        - Short: 1m close/pierce of the **upper SMA Bollinger** and RSI > 70
-        - Entries only at **market open (IST)**: London **12:30–2:00 PM**, US **7:00–9:30 PM**
-        - Fade the **previous 1h run**: long only after a down hour, short only after an up hour
-        - After a **losing trade**, wait **15 minutes from that entry**, then re-enter on **1h trend only** (max **2 SL per open**)
-        - After a **profit**, no more entries until the **next open** (London → US, or US → next London)
+        ### Rules used (`LONDON_SHORT_US_LONG`)
+        - **London 12:30–2:00 PM IST: SHORT only.** Wait for **2 red 1m candles** back to back, then short at the 2nd close
+        - **US 7:00–9:30 PM IST: LONG only.** Wait for **2 green 1m candles** back to back, then long at the 2nd close
+        - London SL = **first red candle's high**. After a London **loss**, wait **15 minutes**, then the same 2-red pattern with SL **one tick above** that high
+        - US SL = **first green candle's low**. After a US **loss**, wait **15 minutes**, then the same 2-green pattern with SL **one tick below** that low
+        - After a **profit**, no more entries until the **next open** (London → US, or US → next London). Max **2 SL per open**
+        - No close-vs-open side flip. No US shorts. No London longs. No Bollinger, RSI, or 1h fade
         - No entries in the London grind, 5:30–7:00 PM, or overnight after 9:30 PM
         - Max **4 trades / IST day**. Kill-switch at **-$14** daily P/L
-        - **100 lots** every trade. Stop **-$3.50** (price). Base TP **+$10 net of fees**
+        - **100 lots** every trade. TP **+$10 net of fees**
         - **+$5 lock is off** — after fees a +$5 winner cannot pay for a stop
         - Delta **taker fee 0.05%** of notional on entry and again on exit
         """

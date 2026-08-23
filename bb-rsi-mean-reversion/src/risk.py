@@ -167,11 +167,15 @@ def build_trade_plan(
     lots: int = FIXED_LOTS,
     fee_pct_per_side: float = TAKER_FEE_PCT,
     net_of_fees: bool = True,
+    stop_override: float | None = None,
 ) -> TradePlan:
     _ = (candle_low, candle_high)
     lots = FIXED_LOTS
-    exact_distance = exact_stop_distance(lots, risk_usd, contract_eth)
-    sl = round_to_tick(stop_price(side, entry_price, exact_distance), tick_size)
+    if stop_override is not None:
+        sl = round_to_tick(stop_override, tick_size)
+    else:
+        exact_distance = exact_stop_distance(lots, risk_usd, contract_eth)
+        sl = round_to_tick(stop_price(side, entry_price, exact_distance), tick_size)
     tp_gross = gross_target_usd(
         take_profit_usd, entry_price, lots, contract_eth, fee_pct_per_side, net_of_fees=net_of_fees
     )

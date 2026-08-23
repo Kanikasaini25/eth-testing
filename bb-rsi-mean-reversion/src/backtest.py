@@ -1,22 +1,19 @@
-"""Bar-by-bar 1m backtest for SMA Bollinger + RSI mean reversion."""
+"""Bar-by-bar 1m backtest for London/US session-open entries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from src.config import (
-    BB_PERIOD,
     DAILY_MAX_LOSS_USD,
     DAILY_TRADE_CAP,
     DEFAULT_CONTRACT_ETH,
     FIXED_LOTS,
-    HTF_BARS,
     LOSS_COOLDOWN_MINUTES,
     MAX_PROFIT_USD,
     MAX_SESSION_STOPS,
     PER_TRADE_STOP_USD,
     PROFIT_LOCK_USD,
-    RSI_PERIOD,
     TAKER_FEE_PCT,
     TAKE_PROFIT_USD,
 )
@@ -28,10 +25,10 @@ from src.risk import (
     trading_fee_usd,
     trail_lock_price,
 )
-from src.session import can_open_new_trade, in_loss_cooldown, parse_bar_time, session_key, utc_day
+from src.session import can_open_new_trade, in_loss_cooldown, is_london_open, is_us_open, parse_bar_time, session_key, utc_day
 from src.strategy import evaluate_closed_candle
 
-WARMUP = max(BB_PERIOD, RSI_PERIOD + 1, HTF_BARS + 1)
+WARMUP = 2
 
 
 @dataclass
@@ -45,14 +42,12 @@ class SimPosition:
     max_profit_price: float
     contract_eth: float
     entry_ts: str
-    rsi: float
-    lower_band: float
-    upper_band: float
     entry_fee: float = 0.0
     profit_locked: bool = False
     entry_open: float = 0.0
     entry_high: float = 0.0
     entry_low: float = 0.0
+    session: str = ""
 
 
 @dataclass
@@ -68,7 +63,6 @@ class Trade:
     pnl_usd: float
     wallet_balance: float
     exit_reason: str
-    rsi: float
     points: float
     gross_pnl: float = 0.0
     entry_fee: float = 0.0
@@ -76,6 +70,7 @@ class Trade:
     entry_open: float = 0.0
     entry_high: float = 0.0
     entry_low: float = 0.0
+    session: str = ""
 
 
 @dataclass
@@ -217,6 +212,13 @@ class _Engine:
         self.session_sls = 0
         self.session_profit = False
 
+    def _retry_after_session_loss(self, bar_time) -> bool:
+        if not self.last_loss_ts:
+            return False
+        lost_at = parse_bar_time(self.last_loss_ts)
+        current = session_key(bar_time)
+        return bool(current) and current == session_key(lost_at)
+
     def _mark_equity(self, bar: dict) -> None:
         unrealized = 0.0
         if self.position is not None:
@@ -274,11 +276,16 @@ class _Engine:
             return
         if in_loss_cooldown(self.last_loss_ts, bar_time, self.cfg.loss_cooldown_minutes):
             return
+        retry = self._retry_after_session_loss(bar_time)
         signal = evaluate_closed_candle(
             self.candles[: index + 1],
-            after_session_stop=self.session_sls > 0,
+            after_loss=retry,
         )
         if signal is None:
+            return
+        if is_london_open(bar_time) and signal.side != "short":
+            return
+        if is_us_open(bar_time) and signal.side != "long":
             return
         if self.kill:
             self.skipped_kill += 1
@@ -300,6 +307,7 @@ class _Engine:
             lots=self.cfg.lots,
             fee_pct_per_side=self.cfg.fee_pct_per_side,
             net_of_fees=self.cfg.net_of_fees,
+            stop_override=signal.stop_price,
         )
         entry_fee = trading_fee_usd(
             plan.entry_price,
@@ -319,13 +327,11 @@ class _Engine:
             max_profit_price=plan.max_profit_price,
             contract_eth=plan.contract_eth,
             entry_ts=bar["timestamp"],
-            rsi=signal.indicators.rsi,
-            lower_band=signal.indicators.lower_band,
-            upper_band=signal.indicators.upper_band,
             entry_fee=entry_fee,
             entry_open=float(bar["open"]),
             entry_high=float(bar["high"]),
             entry_low=float(bar["low"]),
+            session=signal.session,
         )
         self.trades_today += 1
 
@@ -358,7 +364,6 @@ class _Engine:
                 pnl_usd=round(net, 4),
                 wallet_balance=self.wallet,
                 exit_reason=reason,
-                rsi=round(position.rsi, 2),
                 points=round(points, 4),
                 gross_pnl=round(gross, 4),
                 entry_fee=round(position.entry_fee, 4),
@@ -366,10 +371,11 @@ class _Engine:
                 entry_open=position.entry_open,
                 entry_high=position.entry_high,
                 entry_low=position.entry_low,
+                session=position.session,
             )
         )
         if net < 0:
-            self.last_loss_ts = position.entry_ts
+            self.last_loss_ts = bar["timestamp"]
             if reason == "stop_loss":
                 self._roll_session(parse_bar_time(bar["timestamp"]))
                 self.session_sls += 1

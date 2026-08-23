@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.backtest import Trade
 from src.config import DEFAULT_CONTRACT_ETH
-from src.indicators import indicator_series
 from src.risk import trade_risk_reward
 from src.session import IST, parse_bar_time
 
@@ -68,7 +67,7 @@ def build_delta_figure(
     *,
     symbol: str = "ETHUSD",
 ) -> object:
-    """Interactive candlesticks + volume + RSI, styled like Delta / TradingView."""
+    """Interactive candlesticks + volume, styled like Delta / TradingView."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -83,18 +82,16 @@ def build_delta_figure(
     lows = [float(row["low"]) for row in ohlcv]
     closes = [float(row["close"]) for row in ohlcv]
     volumes = [float(row.get("volume") or 0) for row in ohlcv]
-    series = indicator_series(closes)
     fig = make_subplots(
-        rows=3,
+        rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.58, 0.18, 0.24],
-        specs=[[{"secondary_y": False}], [{"secondary_y": False}], [{"secondary_y": False}]],
+        vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+        specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
     )
-    _add_price_pane(fig, times, opens, highs, lows, closes, series)
+    _add_price_pane(fig, times, opens, highs, lows, closes)
     _add_volume_pane(fig, times, volumes, closes)
-    _add_rsi_pane(fig, times, series["rsi"])
     if trades:
         trades = _trades_in_window(ohlcv, trades)
         _add_trade_markers(fig, ohlcv, trades, times)
@@ -115,7 +112,6 @@ def build_delta_figure(
     fig.update_yaxes(gridcolor=DELTA_GRID, showgrid=True)
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
     return fig
 
 
@@ -123,7 +119,7 @@ def _ist_label(timestamp_iso: str) -> str:
     return parse_bar_time(timestamp_iso).astimezone(IST).strftime("%Y-%m-%d %H:%M")
 
 
-def _add_price_pane(fig, times, opens, highs, lows, closes, series) -> None:
+def _add_price_pane(fig, times, opens, highs, lows, closes) -> None:
     import plotly.graph_objects as go
 
     fig.add_trace(
@@ -143,21 +139,6 @@ def _add_price_pane(fig, times, opens, highs, lows, closes, series) -> None:
         row=1,
         col=1,
     )
-    fig.add_trace(
-        go.Scatter(x=times, y=series["upper"], name="BB upper", line=dict(color="#26a69a", width=1)),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=times, y=series["sma"], name="SMA 20", line=dict(color="#f5d76e", width=1.2)),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=times, y=series["lower"], name="BB lower", line=dict(color="#ef5350", width=1)),
-        row=1,
-        col=1,
-    )
 
 
 def _add_volume_pane(fig, times, volumes, closes) -> None:
@@ -171,18 +152,6 @@ def _add_volume_pane(fig, times, volumes, closes) -> None:
         row=2,
         col=1,
     )
-
-
-def _add_rsi_pane(fig, times, rsi_vals) -> None:
-    import plotly.graph_objects as go
-
-    fig.add_trace(
-        go.Scatter(x=times, y=rsi_vals, name="RSI 14", line=dict(color="#ab47bc", width=1.4)),
-        row=3,
-        col=1,
-    )
-    for level, color in ((30, DELTA_UP), (70, DELTA_DOWN)):
-        fig.add_hline(y=level, line_dash="dot", line_color=color, opacity=0.6, row=3, col=1)
 
 
 def _add_trade_markers(fig, ohlcv: list[dict], trades: list[Trade], times: list[str]) -> None:

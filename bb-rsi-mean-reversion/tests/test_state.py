@@ -72,7 +72,7 @@ class StateTests(unittest.TestCase):
                 exit_ts="2026-08-22T07:11:00+00:00",
             )
             soon = datetime(2026, 8, 22, 7, 20, tzinfo=timezone.utc)
-            later = datetime(2026, 8, 22, 7, 25, tzinfo=timezone.utc)
+            later = datetime(2026, 8, 22, 7, 26, tzinfo=timezone.utc)
             self.assertTrue(tracker.in_loss_cooldown(soon))
             self.assertFalse(tracker.can_take_trade(soon))
             self.assertFalse(tracker.in_loss_cooldown(later))

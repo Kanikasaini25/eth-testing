@@ -153,7 +153,7 @@ class DailyTracker:
         self.state.realized_pnl = round(self.state.realized_pnl + pnl_usd, 4)
         self.state.position = None
         if pnl_usd < 0:
-            self.state.last_loss_ts = position.entry_ts
+            self.state.last_loss_ts = stamp
             if reason == "stop_loss":
                 self.state.session_sl_count += 1
         elif pnl_usd > 0:

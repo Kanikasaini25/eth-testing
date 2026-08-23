@@ -11,7 +11,15 @@ from src.errors import DeltaAPIError, OrderError, StrategyError
 from src.logger import scan_line, setup_logger, trade_line
 from src.orders import OrderExecutor
 from src.risk import build_trade_plan, price_pnl_usd, stop_hit, take_profit_hit, trading_fee_usd, trail_lock_price
-from src.session import can_open_new_trade, session_label, utc_now
+from src.session import (
+    can_open_new_trade,
+    is_london_open,
+    is_us_open,
+    parse_bar_time,
+    session_key,
+    session_label,
+    utc_now,
+)
 from src.state import DailyTracker, OpenPosition
 from src.strategy import Signal, evaluate_closed_candle
 from src.websocket_client import TickerFeed
@@ -173,27 +181,34 @@ class BBRSIRunner:
 
         self.tracker.state.last_candle_ts = last_ts
         self.tracker.save()
-        signal = evaluate_closed_candle(
-            candles, after_session_stop=self.tracker.state.session_sl_count > 0
-        )
-        indicators = signal.indicators if signal else None
+        retry = self._retry_after_session_loss(now)
+        signal = evaluate_closed_candle(candles, after_loss=retry)
         logger.info(
             scan_line(
                 close=float(candles[-1]["close"]),
                 mark=mark,
-                rsi=f"{indicators.rsi:.1f}" if indicators else "n/a",
-                lower=f"{indicators.lower_band:.2f}" if indicators else "n/a",
-                upper=f"{indicators.upper_band:.2f}" if indicators else "n/a",
                 session=session,
                 signal=signal.side.upper() if signal else "NONE",
+                reason=signal.reason if signal else "",
                 daily_pnl=self.tracker.state.realized_pnl,
                 trades_today=self.tracker.state.trades_taken,
                 trade_cap=self.settings.daily_trade_cap,
             )
         )
         if signal is None:
-            return TickResult(success=True, action="No BB/RSI signal", mark_price=mark)
+            return TickResult(success=True, action="No session-bar signal", mark_price=mark)
+        if is_london_open(now) and signal.side != "short":
+            return TickResult(success=True, action="London is short-only", mark_price=mark)
+        if is_us_open(now) and signal.side != "long":
+            return TickResult(success=True, action="US is long-only", mark_price=mark)
         return self._enter(signal, mark)
+
+    def _retry_after_session_loss(self, now) -> bool:
+        last_loss = self.tracker.state.last_loss_ts
+        if not last_loss:
+            return False
+        current = session_key(now)
+        return bool(current) and current == session_key(parse_bar_time(last_loss))
 
     def _enter(self, signal: Signal, mark: float) -> TickResult:
         candle = signal.candle
@@ -212,6 +227,7 @@ class BBRSIRunner:
                 lots=self.settings.lots,
                 fee_pct_per_side=self.settings.fee_pct_per_side,
                 net_of_fees=self.settings.net_of_fees,
+                stop_override=signal.stop_price,
             )
             position = self.orders.enter(plan)
         except (OrderError, StrategyError, DeltaAPIError) as exc:
@@ -227,7 +243,7 @@ class BBRSIRunner:
             daily_pnl=self.tracker.state.realized_pnl,
             trades_today=self.tracker.state.trades_taken,
             trade_cap=self.settings.daily_trade_cap,
-            extra=f"lots={position.lots} rsi={signal.indicators.rsi:.1f}",
+            extra=f"lots={position.lots} {signal.reason}",
         )
         logger.info("ENTER %s", line)
         return TickResult(success=True, action=f"ENTER {line}", mark_price=mark)

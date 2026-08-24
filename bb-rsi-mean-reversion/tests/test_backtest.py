@@ -7,9 +7,11 @@ from src.tables import daily_rows, trade_rows
 
 
 def _bar(index: int, price: float, hour: int = 7, wick: float = 0.2) -> dict:
-    minute = index % 60
-    day = index // 60
-    stamp = datetime(2026, 8, 3 + day, hour, minute, tzinfo=timezone.utc)
+    total_min = hour * 60 + index * 5
+    day = total_min // (24 * 60)
+    remain = total_min % (24 * 60)
+    stamp_hour, minute = divmod(remain, 60)
+    stamp = datetime(2026, 8, 3 + day, stamp_hour, minute, tzinfo=timezone.utc)
     return {
         "timestamp": stamp.isoformat(),
         "open": price + 0.05,
@@ -21,7 +23,7 @@ def _bar(index: int, price: float, hour: int = 7, wick: float = 0.2) -> dict:
 
 
 def _us_bar(index: int, *, open_px: float, close_px: float, wick: float = 0.2) -> dict:
-    minute = 30 + index
+    minute = 30 + index * 5
     hour = 13 + minute // 60
     minute = minute % 60
     stamp = datetime(2026, 8, 3, hour, minute, tzinfo=timezone.utc)
@@ -69,16 +71,18 @@ class BacktestTests(unittest.TestCase):
         )
 
     def test_us_two_greens_create_a_long(self) -> None:
-        candles = [_us_green(index, 100.0 + index * 0.4) for index in range(4)]
+        candles = [_us_green(index, 100.0 + index * 0.4) for index in range(8)]
         result = run_backtest(candles, symbol="ETHUSD", days=1)
         self.assertGreaterEqual(len(result.trades), 1)
         self.assertEqual(result.trades[0].side, "long")
         self.assertEqual(result.trades[0].session, "US")
 
-    def test_us_two_reds_do_not_short(self) -> None:
-        candles = [_us_red(index, 100.0 - index) for index in range(4)]
+    def test_us_two_reds_create_a_short(self) -> None:
+        candles = [_us_red(index, 100.0 - index) for index in range(8)]
         result = run_backtest(candles, symbol="ETHUSD", days=1)
-        self.assertEqual(len(result.trades), 0)
+        self.assertGreaterEqual(len(result.trades), 1)
+        self.assertEqual(result.trades[0].side, "short")
+        self.assertEqual(result.trades[0].session, "US")
 
     def test_no_entry_outside_london_us_session(self) -> None:
         candles = [_bar(index, 100.0, hour=4) for index in range(WARMUP)]

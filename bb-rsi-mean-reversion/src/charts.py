@@ -149,7 +149,7 @@ def render_price_with_bands(ohlcv: list[dict]) -> str:
     return _multi_line(
         [plot_close],
         colors=["#1f77b4"],
-        title="Price (1m close)",
+        title="Price (5m close)",
         y_prefix="$",
         caption=_ist_caption(window),
     )

@@ -1,4 +1,4 @@
-"""Live loop: 1m signals, Asian filter, $14 kill-switch, isolated from other strategies."""
+"""Live loop: 15m bias + 5m entry, $14 kill-switch, isolated from other strategies."""
 
 from __future__ import annotations
 
@@ -11,15 +11,7 @@ from src.errors import DeltaAPIError, OrderError, StrategyError
 from src.logger import scan_line, setup_logger, trade_line
 from src.orders import OrderExecutor
 from src.risk import build_trade_plan, price_pnl_usd, stop_hit, take_profit_hit, trading_fee_usd, trail_lock_price
-from src.session import (
-    can_open_new_trade,
-    is_london_open,
-    is_us_open,
-    parse_bar_time,
-    session_key,
-    session_label,
-    utc_now,
-)
+from src.session import can_open_new_trade, parse_bar_time, session_key, session_label, utc_now
 from src.state import DailyTracker, OpenPosition
 from src.strategy import Signal, evaluate_closed_candle
 from src.websocket_client import TickerFeed
@@ -173,11 +165,11 @@ class BBRSIRunner:
 
         candles = self.client.fetch_closed_candles()
         if not candles:
-            return TickResult(success=True, action="Waiting for 1m candles", mark_price=mark)
+            return TickResult(success=True, action="Waiting for 5m candles", mark_price=mark)
 
         last_ts = candles[-1]["timestamp"]
         if last_ts == self.tracker.state.last_candle_ts:
-            return TickResult(success=True, action="No new closed 1m candle", mark_price=mark)
+            return TickResult(success=True, action="No new closed 5m candle", mark_price=mark)
 
         self.tracker.state.last_candle_ts = last_ts
         self.tracker.save()
@@ -197,10 +189,6 @@ class BBRSIRunner:
         )
         if signal is None:
             return TickResult(success=True, action="No session-bar signal", mark_price=mark)
-        if is_london_open(now) and signal.side != "short":
-            return TickResult(success=True, action="London is short-only", mark_price=mark)
-        if is_us_open(now) and signal.side != "long":
-            return TickResult(success=True, action="US is long-only", mark_price=mark)
         return self._enter(signal, mark)
 
     def _retry_after_session_loss(self, now) -> bool:

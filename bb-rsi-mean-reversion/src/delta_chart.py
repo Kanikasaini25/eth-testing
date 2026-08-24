@@ -98,7 +98,7 @@ def build_delta_figure(
         for idx, trade in enumerate(trades, 1):
             _add_rr_tool(fig, ohlcv, times, trade, tag=f"T{idx}")
     fig.update_layout(
-        title=f"{symbol} 1m · Delta-style chart (IST)",
+        title=f"{symbol} 5m · Delta-style chart (IST)",
         template="plotly_dark",
         paper_bgcolor=DELTA_PAPER,
         plot_bgcolor=DELTA_BG,

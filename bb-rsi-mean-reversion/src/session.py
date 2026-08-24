@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from src.config import (
+    BAR_SECONDS,
     LONDON_OPEN_END_MIN_IST,
     LONDON_OPEN_START_MIN_IST,
     US_OPEN_END_MIN_IST,
@@ -94,7 +95,7 @@ def session_key(moment: datetime | None = None) -> str:
 
 def candle_is_closed(timestamp_iso: str, now: datetime | None = None) -> bool:
     bar_time = parse_bar_time(timestamp_iso)
-    return bar_time.timestamp() + 60 <= (now or utc_now()).timestamp()
+    return bar_time.timestamp() + BAR_SECONDS <= (now or utc_now()).timestamp()
 
 
 def parse_bar_time(timestamp_iso: str) -> datetime:

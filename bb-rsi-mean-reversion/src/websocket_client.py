@@ -6,7 +6,7 @@ import json
 import threading
 from typing import Any, Callable
 
-from src.config import WS_RECONNECT_SECONDS, Settings
+from src.config import CANDLE_RESOLUTION, WS_RECONNECT_SECONDS, Settings
 from src.logger import setup_logger
 
 logger = setup_logger()
@@ -61,7 +61,7 @@ class TickerFeed:
                 "payload": {
                     "channels": [
                         {"name": "v2/ticker", "symbols": [self.settings.symbol]},
-                        {"name": "candlestick_1m", "symbols": [self.settings.symbol]},
+                        {"name": f"candlestick_{CANDLE_RESOLUTION}", "symbols": [self.settings.symbol]},
                     ]
                 },
             }

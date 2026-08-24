@@ -1,4 +1,4 @@
-"""Bar-by-bar 1m backtest for London/US session-open entries."""
+"""Bar-by-bar 5m backtest for London/US session-open entries."""
 
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ from src.risk import (
     trading_fee_usd,
     trail_lock_price,
 )
-from src.session import can_open_new_trade, in_loss_cooldown, is_london_open, is_us_open, parse_bar_time, session_key, utc_day
+from src.session import can_open_new_trade, in_loss_cooldown, parse_bar_time, session_key, utc_day
 from src.strategy import evaluate_closed_candle
 
-WARMUP = 2
+WARMUP = 6
 
 
 @dataclass
@@ -282,10 +282,6 @@ class _Engine:
             after_loss=retry,
         )
         if signal is None:
-            return
-        if is_london_open(bar_time) and signal.side != "short":
-            return
-        if is_us_open(bar_time) and signal.side != "long":
             return
         if self.kill:
             self.skipped_kill += 1

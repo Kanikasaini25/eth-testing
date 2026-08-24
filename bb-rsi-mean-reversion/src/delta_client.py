@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from src.config import CANDLE_LOOKBACK, DEFAULT_CONTRACT_ETH, Settings
+from src.config import BAR_SECONDS, CANDLE_LOOKBACK, CANDLE_RESOLUTION, DEFAULT_CONTRACT_ETH, Settings
 from src.errors import DeltaAPIError
 from src.http import DeltaHttp
 
@@ -66,13 +66,13 @@ class DeltaClient:
 
     def fetch_closed_candles(self, limit: int = CANDLE_LOOKBACK) -> list[dict[str, Any]]:
         end = int(datetime.now(timezone.utc).timestamp())
-        start = end - (limit + 5) * 60
+        start = end - (limit + 5) * BAR_SECONDS
         raw = self.http.request(
             "GET",
             "/v2/history/candles",
             params={
                 "symbol": self.settings.symbol,
-                "resolution": "1m",
+                "resolution": CANDLE_RESOLUTION,
                 "start": start,
                 "end": end,
             },
@@ -84,7 +84,7 @@ class DeltaClient:
             if ts in seen:
                 continue
             seen.add(ts)
-            bar_end = ts + 60
+            bar_end = ts + BAR_SECONDS
             if bar_end > end:
                 continue
             rows.append(

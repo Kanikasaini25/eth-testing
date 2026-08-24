@@ -18,7 +18,11 @@ TESTNET_WS_URL = "wss://socket-ind.testnet.deltaex.org"
 PROD_INDIA_REST_URL = "https://api.india.delta.exchange"
 PROD_INDIA_WS_URL = "wss://socket.india.delta.exchange"
 
-# London shorts on 2 red 1m bars, SL = first red high. US longs on 2 green 1m bars, SL = first green low.
+# 15m: 2 green = buy, 2 red = sell. 5m: matching 2-candle entry. SL on first 5m candle.
+CANDLE_RESOLUTION = "5m"
+BAR_MINUTES = 5
+BAR_SECONDS = BAR_MINUTES * 60
+CANDLES_PER_DAY = 24 * 60 // BAR_MINUTES
 
 # India clock. New entries only at session opens (not the full London/US day).
 # London open 12:30–2:00 PM IST. US/NYSE open 7:00–9:30 PM IST.
@@ -28,6 +32,7 @@ US_OPEN_START_MIN_IST = 19 * 60
 US_OPEN_END_MIN_IST = 21 * 60 + 30
 LOSS_COOLDOWN_MINUTES = 15
 MAX_SESSION_STOPS = 2
+MAX_STOP_POINTS = 6.0
 
 DAILY_TRADE_CAP = 4
 DAILY_MAX_LOSS_USD = 14.0

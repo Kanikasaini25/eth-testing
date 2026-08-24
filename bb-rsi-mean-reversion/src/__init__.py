@@ -1,5 +1,5 @@
 """
-ETH 1m session-open bot (Delta testnet).
+ETH 5m session-open bot (Delta testnet).
 
 This package is fully isolated. It does not import or modify the LQDTY live
 strategy, backtests, or Streamlit app. Use a dedicated API key / subaccount —

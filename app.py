@@ -21,9 +21,10 @@ from src.delta_trading import DeltaTradingClient, is_testnet_url
 from src.email_notify import is_email_configured, is_email_enabled, send_test_email
 from src.live_strategy import LiveLiquidityRunner, default_rules_path
 from src.pipeline import run_pipeline
+from src.ui.liquidity_reversal_1h_app import render_liquidity_reversal_app
 
 st.set_page_config(
-    page_title="YouTube Strategy Backtester",
+    page_title="ETH Strategy Backtester",
     page_icon="📈",
     layout="wide",
 )
@@ -488,6 +489,21 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
 
 
 def main() -> None:
+    st.sidebar.title("ETH Strategies")
+    app_mode = st.sidebar.radio(
+        "Choose strategy UI",
+        options=["1H Liquidity Reversal", "YouTube / LQDTY"],
+        index=0,
+        key="app_mode",
+        help="1H Liquidity Reversal is a standalone strategy. "
+        "YouTube / LQDTY is the existing transcript pipeline.",
+    )
+    st.sidebar.divider()
+
+    if app_mode == "1H Liquidity Reversal":
+        render_liquidity_reversal_app()
+        return
+
     st.title("YouTube Strategy Backtester")
     st.caption(
         "Extract trading techniques from a YouTube tutorial and backtest them "

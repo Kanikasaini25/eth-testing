@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run 15m liquidity-grab live strategy on Delta demo/live account."""
+"""Run 15m previous-day POC live strategy on Delta demo/live account."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from src.live_strategy import LiveLiquidityRunner
+from src.live_strategy import LivePocRunner
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run 15m liquidity-grab live strategy")
+    parser = argparse.ArgumentParser(description="Run 15m previous-day POC live strategy")
     parser.add_argument("--once", action="store_true", help="Run a single tick and exit")
     parser.add_argument("--loop", action="store_true", help="Run continuously every N seconds")
     parser.add_argument("--interval", type=int, default=60, help="Seconds between ticks")
@@ -23,7 +23,7 @@ def main() -> int:
     parser.add_argument("--enable", action="store_true", help="Mark strategy as enabled in state")
     args = parser.parse_args()
 
-    runner = LiveLiquidityRunner()
+    runner = LivePocRunner()
     if args.enable:
         runner.set_enabled(True)
 
@@ -32,7 +32,10 @@ def main() -> int:
         if not result.success:
             print(f"Tick FAILED: {result.error}")
             return 1
-        print(f"Mark: {result.mark_price} | Swing High: {result.upper_level} | Swing Low: {result.lower_level}")
+        print(
+            f"Mark: {result.mark_price} | POC: {result.poc} | VAL: {result.val} | "
+            f"VAH: {result.vah} | Bias: {result.bias or '—'}"
+        )
         print(f"Position: {result.exchange_position} lots | Tracked: {result.in_position}")
         for action in result.actions:
             print(f"  - {action}")

@@ -88,24 +88,23 @@ def send_entry_signal_email(
     lower_level: float | None = None,
 ) -> EmailResult:
     trade_label = "BUY (LONG)" if side == "long" else "SELL (SHORT)"
-    subject = f"LQDTY Entry Signal: {trade_label} {symbol} @ {entry_price:.2f}"
+    subject = f"POC Entry Signal: {trade_label} {symbol} @ {entry_price:.2f}"
 
     body = "\n".join(
         [
-            "15m Liquidity Grab — Entry Signal",
+            "15m Previous-Day POC — Entry Signal",
             "",
             f"Symbol:      {symbol}",
             f"Signal:      {trade_label}",
             f"Entry time:  {entry_ts}",
             f"Entry price: {entry_price:.2f}",
             f"Stop loss:   {stop_loss:.2f}",
-            f"Target 1:    {target_1:.2f}",
-            f"Target 2:    {target_2:.2f}",
+            f"Target:      {target_1:.2f}",
             f"Size:        {entry_lots} lots",
-            f"Liquidity:   {entry_line} line",
+            f"Level:       {entry_line}",
             "",
-            f"Upper line:  {upper_level if upper_level is not None else '—'}",
-            f"Lower line:  {lower_level if lower_level is not None else '—'}",
+            f"VAH:         {upper_level if upper_level is not None else '—'}",
+            f"VAL:         {lower_level if lower_level is not None else '—'}",
             "",
             "Order placed on Delta Exchange demo/live account.",
         ]
@@ -126,11 +125,11 @@ def send_partial_exit_email(
 ) -> EmailResult:
     trade_label = "LONG" if side == "long" else "SHORT"
     points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-    subject = f"LQDTY Partial Exit: {partial_lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
+    subject = f"POC Partial Exit: {partial_lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
 
     body = "\n".join(
         [
-            "LQDTY Liquidity Strategy — Partial Exit",
+            "POC Strategy — Partial Exit",
             "",
             f"Symbol:         {symbol}",
             f"Side:           {trade_label}",
@@ -167,11 +166,11 @@ def send_stop_loss_email(
         "exchange_stop": "Stop Loss Hit (Exchange)",
     }
     headline = label_map.get(exit_type, "Stop Loss Hit")
-    subject = f"LQDTY {headline}: {lots} lots {symbol} @ {exit_price:.2f}"
+    subject = f"POC {headline}: {lots} lots {symbol} @ {exit_price:.2f}"
 
     body = "\n".join(
         [
-            f"LQDTY Liquidity Strategy — {headline}",
+            f"POC Strategy — {headline}",
             "",
             f"Symbol:         {symbol}",
             f"Side:           {trade_label}",
@@ -199,11 +198,11 @@ def send_runner_exit_email(
 ) -> EmailResult:
     trade_label = "LONG" if side == "long" else "SHORT"
     points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-    subject = f"LQDTY Runner Exit ({reason}): {runner_lots} lots {symbol} @ {exit_price:.2f}"
+    subject = f"POC Runner Exit ({reason}): {runner_lots} lots {symbol} @ {exit_price:.2f}"
 
     body = "\n".join(
         [
-            f"LQDTY Liquidity Strategy — Runner Exit ({reason})",
+            f"POC Strategy — Runner Exit ({reason})",
             "",
             f"Symbol:       {symbol}",
             f"Side:         {trade_label}",
@@ -227,11 +226,11 @@ def send_take_profit_email(
 ) -> EmailResult:
     trade_label = "LONG" if side == "long" else "SHORT"
     points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-    subject = f"LQDTY Take Profit: {lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
+    subject = f"POC Take Profit: {lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
 
     body = "\n".join(
         [
-            "15m Liquidity Grab — Take Profit",
+            "15m Previous-Day POC — Take Profit",
             "",
             f"Symbol:       {symbol}",
             f"Side:         {trade_label}",
@@ -249,6 +248,6 @@ def send_take_profit_email(
 
 def send_test_email() -> EmailResult:
     return send_email(
-        subject="LQDTY Strategy — Test Email",
-        body="This is a test email from your LQDTY live strategy alerts.",
+        subject="POC Strategy — Test Email",
+        body="This is a test email from your 15m previous-day POC live strategy alerts.",
     )

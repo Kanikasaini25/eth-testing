@@ -1,4 +1,4 @@
-# 15m Liquidity Grab Live Strategy
+# 15m Previous-Day POC Live Strategy
 
 On the server:
 
@@ -17,7 +17,7 @@ Put Delta keys in `.env`. Keep `data/strategies/wI9b968AvW8_rules.json`.
 streamlit run app.py
 ```
 
-Set symbol, lookback days, lots, and take-profit in the sidebar, then click **Run backtest**. The app pulls public Delta candles (no API key) and simulates the 15-minute sweep + 1-minute two-candle reversal.
+Set symbol, lookback days, lots, and take-profit in the sidebar, then click **Run backtest**. The app pulls public Delta 15-minute candles (no API key) and simulates previous-day volume profile levels (POC / VAL / VAH) plus a 15-minute rejection.
 
 ## Live trading
 
@@ -25,6 +25,6 @@ Set symbol, lookback days, lots, and take-profit in the sidebar, then click **Ru
 python scripts/run_live_strategy.py --loop --enable
 ```
 
-The bot marks 15-minute swing highs and lows, waits for a liquidity grab, then enters on a 1-minute two-candle reversal (100 lots, 15-point take profit).
+Each UTC session close builds a fixed-range volume profile on that complete day. The next day the bot waits for price to return to POC (or VAL / VAH), checks previous-day direction, and only enters after a 15-minute rejection candle.
 
 For research only. Past performance does not guarantee future results.

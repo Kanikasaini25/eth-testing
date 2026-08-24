@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 
 def passes_stop_filters(
     side: str,
@@ -26,27 +28,6 @@ def passes_stop_filters(
     return True
 
 
-def resolve_stop(
-    side: str,
-    confirmation_stop: float,
-    grab_extreme: float | None,
-    mode: str,
-) -> float:
-    if mode != "grab_extreme" or grab_extreme is None:
-        return confirmation_stop
-    if side == "long":
-        return min(confirmation_stop, grab_extreme)
-    return max(confirmation_stop, grab_extreme)
-
-
-def sweep_depth(side: str, grab_level: float | None, grab_extreme: float | None) -> float:
-    if grab_level is None or grab_extreme is None:
-        return 0.0
-    if side == "long":
-        return grab_level - grab_extreme
-    return grab_extreme - grab_level
-
-
 def in_utc_session(timestamp: str, start_hour: int, end_hour: int) -> bool:
     hour = int(timestamp[11:13])
     if start_hour == end_hour:
@@ -68,24 +49,34 @@ def entry_target_price(side: str, entry_price: float, reward_points: float) -> f
     return entry_price - reward_points
 
 
-def m15_trend(closed_m15: list[dict], lookback: int = 8) -> str:
-    if lookback <= 0 or len(closed_m15) < lookback + 1:
-        return "flat"
-    start = float(closed_m15[-lookback - 1]["close"])
-    end = float(closed_m15[-1]["close"])
-    if end > start:
-        return "up"
-    if end < start:
-        return "down"
-    return "flat"
-
-
 def trend_allows(side: str, trend: str) -> bool:
     if trend == "flat":
         return True
     if trend == "up":
         return side == "long"
     return side == "short"
+
+
+def is_utc_monday(timestamp: str) -> bool:
+    return datetime.fromisoformat(timestamp).weekday() == 0
+
+
+def open_pullback_allows(side: str, fill: float, day_open: float | None) -> bool:
+    if day_open is None:
+        return True
+    if side == "long":
+        return fill <= day_open
+    return fill >= day_open
+
+
+def intraday_range_allows(
+    day_high: float | None,
+    day_low: float | None,
+    max_range: float,
+) -> bool:
+    if max_range <= 0 or day_high is None or day_low is None:
+        return True
+    return (day_high - day_low) <= max_range
 
 
 def fill_stop_allowed(fill: float, stop_loss: float, max_sl_points: float) -> bool:

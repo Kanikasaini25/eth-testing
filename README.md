@@ -1,14 +1,13 @@
-# YouTube Strategy Backtester
+# Strategy Backtester
 
-Analyze trading techniques from YouTube tutorials and backtest them on **Delta Exchange ETH futures** historical data.
+Backtest trading strategy rules on **Delta Exchange ETH futures** historical data.
 
 ## What it does
 
-1. Fetches YouTube video transcript
-2. Extracts trading techniques (MACD, MA crossover, breakout)
-3. Downloads **ETHUSD 1d** candles from Delta Exchange
-4. Backtests each technique on historical data
-5. Saves a markdown report + JSON results
+1. Loads trading rules from `data/strategies/*.json`
+2. Downloads **ETHUSD 1d** candles from Delta Exchange
+3. Backtests each technique on historical data
+4. Saves a markdown report + JSON results
 
 ## Setup
 
@@ -19,14 +18,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your YouTube URL:
-
-```env
-YOUTUBE_URLS=https://www.youtube.com/watch?v=your-video-id
-DELTA_SYMBOL=ETHUSD
-DELTA_RESOLUTION=1d
-BACKTEST_DAYS=30
-```
+Edit `.env` with your Delta settings. Point `STRATEGY_RULES` at a JSON file in `data/strategies/` if you want a default other than `lqdty_liquidity.json`.
 
 ## Run with Streamlit UI
 
@@ -34,7 +26,7 @@ BACKTEST_DAYS=30
 streamlit run app.py
 ```
 
-Open the app in your browser, enter a YouTube URL, and click **Run Analysis**.
+Open the app, pick a strategy JSON in the sidebar, and click **Run Analysis**.
 
 ## Run full pipeline (CLI)
 
@@ -45,34 +37,25 @@ python main.py
 Or with options:
 
 ```bash
-python main.py --url "https://youtube.com/watch?v=..." --symbol ETHUSD --days 365
+python main.py --rules data/strategies/lqdty_liquidity.json --symbol ETHUSD --days 365
 ```
 
 ## Output
 
 | File | Description |
 |------|-------------|
-| `data/transcripts/{video_id}.txt` | Raw transcript |
-| `data/strategies/{video_id}_rules.json` | Extracted techniques |
+| `data/strategies/*.json` | Strategy rules (source of truth) |
 | `data/ohlcv/ETHUSD_1d.csv` | Delta Exchange candle data |
-| `data/reports/{video_id}_report.md` | Backtest report |
-| `data/reports/{video_id}_results.json` | Raw backtest metrics |
+| `data/reports/{strategy}_report.md` | Backtest report |
+| `data/reports/{strategy}_results.json` | Raw backtest metrics |
 
-## Transcript-only (legacy)
+## Included strategy
 
-```bash
-python extract_transcripts.py
-```
+| File | Strategy |
+|------|----------|
+| `data/strategies/lqdty_liquidity.json` | LQDTY liquidity (1D levels + 1m shorts) |
 
-## Supported techniques
-
-| Detected in transcript | Strategy |
-|------------------------|----------|
-| Golden cross / MA cross | Moving average crossover |
-| MACD | MACD signal crossover |
-| Breakout / resistance | Price breakout |
-
-If no clear rules are found, the pipeline stops with an error.
+Add another JSON file under `data/strategies/` to backtest additional rules.
 
 ## Delta Exchange
 

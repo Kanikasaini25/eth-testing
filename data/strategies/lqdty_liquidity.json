@@ -9,7 +9,7 @@
       "Draw two horizontal lines: one at the previous day high and one at the previous day low.",
       "These two lines are the liquidity levels for the next session.",
       "After drawing the lines, switch to the 1 minute timeframe for execution.",
-      "Video demonstrates on Gold; the same logic can be adapted to ETH, BTC, or indices after backtesting.",
+      "The same logic can be adapted to ETH, BTC, or indices after backtesting.",
       "Do not take a trade if price stays in the middle and never reaches a liquidity line.",
       "Set alerts on your broker or TradingView when price approaches a liquidity line."
     ],
@@ -18,9 +18,11 @@
       "SHORT setup: price must first reach the upper liquidity line (previous day high zone).",
       "SHORT entry: on 1 minute, wait for a fresh red candle after price reaches the upper line.",
       "SHORT trigger: enter on the NEXT candle when it breaks AND closes below the red candle low.",
-      "LONG setups are disabled — ETH 1m longs won only ~22% and pulled the win rate down.",
+      "LONG setup: price must first reach the lower liquidity line (previous day low zone).",
+      "LONG entry: on 1 minute, wait for a fresh green candle after price reaches the lower line.",
+      "LONG trigger: enter on the NEXT candle when it breaks AND closes above the green candle high.",
       "Signal candle body must be at least 75% of the candle range (strong close, not a doji).",
-      "Entry price must stay within 12 points of the previous-day high (upper liquidity line).",
+      "Entry price must stay within 8 points of the liquidity line (PDH for shorts, PDL for longs).",
       "Skip entries where stop loss is too tight or too wide, or reward-to-risk is under 2.5.",
       "Trade only during active UTC session hours (default 08:00–20:00).",
       "If price is between the two lines, there is no trade."
@@ -57,9 +59,9 @@
       "require_close_beyond_signal": true,
       "require_liquidity_sweep": false,
       "require_signal_touches_line": false,
-      "max_entry_distance_from_line_points": 12.0,
+      "max_entry_distance_from_line_points": 8.0,
       "max_minutes_after_liquidity_touch": 0.0,
-      "allow_longs": false,
+      "allow_longs": true,
       "allow_shorts": true,
       "use_daily_trend_filter": false,
       "use_session_filter": true,
@@ -83,9 +85,6 @@
       "swing_lookback_days": 20,
       "runner_swing_lookback_days": 60,
       "fee_pct_per_side": 0.05
-    },
-    "source_quotes": [
-      "। सबसे बेस्ट क्या है? जो मैं बता रहा हूं आपको, एक वन डे का टाइम फ्रेम चूज़ करो। अब जैसे ही तुम वन डे का टाइम फ्रेम चूज़ करोगे, मैं डिलीट कर देता हूं। एक काम करता हूं ना, हां, डिलीट ही कर देता हूं सारा चीज़। ठीक है"
-    ]
+    }
   }
 ]

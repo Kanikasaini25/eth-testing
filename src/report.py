@@ -7,8 +7,7 @@ from src.backtest import BacktestResult, result_to_dict
 
 
 def generate_report(
-    video_url: str,
-    transcript: str,
+    strategy_id: str,
     rules_json: str,
     results: list[BacktestResult],
     symbol: str,
@@ -17,22 +16,21 @@ def generate_report(
     lines = [
         "# Strategy Backtest Report",
         "",
-        "## Video",
-        f"- URL: {video_url}",
+        "## Strategy",
+        f"- Rules: {strategy_id}",
         "",
         "## Market Data",
         f"- Symbol: {symbol}",
         f"- Timeframe: {resolution}",
         "",
-        "## Extracted Techniques",
+        "## Strategy Rules",
         "```json",
         rules_json.strip(),
         "```",
         "",
         "## Backtest Results",
         "",
-        "_Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. "
-        "The backtest below is a daily ETH approximation only._",
+        "_LQDTY uses previous-day high/low lines (1d) and 1m entries._",
         "",
         "| Technique | Trades | Win Rate | Strategy Return | Buy & Hold | Max Drawdown | Verdict |",
         "|-----------|--------|----------|-----------------|------------|--------------|---------|",
@@ -85,10 +83,6 @@ def generate_report(
 
     lines.extend(
         [
-            "## Transcript Excerpt",
-            "",
-            transcript[:1500] + ("..." if len(transcript) > 1500 else ""),
-            "",
             "---",
             "_For research only. Past performance does not guarantee future results._",
         ]

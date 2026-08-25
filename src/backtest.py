@@ -52,104 +52,8 @@ class BacktestResult:
     rule_compliance: dict[str, bool] | None = None
 
 
-def _closes(rows: list[dict]) -> list[float]:
-    return [float(row["close"]) for row in rows]
-
-
-def _lows(rows: list[dict]) -> list[float]:
-    return [float(row["low"]) for row in rows]
-
-
 def _dates(rows: list[dict]) -> list[str]:
     return [row["timestamp"][:10] for row in rows]
-
-
-def compute_sma(values: list[float], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    for index in range(period - 1, len(values)):
-        result[index] = sum(values[index - period + 1 : index + 1]) / period
-    return result
-
-
-def compute_ema(values: list[float], period: int) -> list[float | None]:
-    result: list[float | None] = [None] * len(values)
-    if len(values) < period:
-        return result
-
-    multiplier = 2 / (period + 1)
-    seed = sum(values[:period]) / period
-    result[period - 1] = seed
-    previous = seed
-
-    for index in range(period, len(values)):
-        current = (values[index] - previous) * multiplier + previous
-        result[index] = current
-        previous = current
-
-    return result
-
-
-def compute_macd(
-    values: list[float],
-    fast: int = 12,
-    slow: int = 26,
-    signal: int = 9,
-) -> tuple[list[float | None], list[float | None]]:
-    ema_fast = compute_ema(values, fast)
-    ema_slow = compute_ema(values, slow)
-    macd_line: list[float | None] = [None] * len(values)
-    macd_points: list[float] = []
-
-    for index, (fast_value, slow_value) in enumerate(zip(ema_fast, ema_slow)):
-        if fast_value is None or slow_value is None:
-            continue
-        value = fast_value - slow_value
-        macd_line[index] = value
-        macd_points.append(value)
-
-    signal_line: list[float | None] = [None] * len(values)
-    if len(macd_points) >= signal:
-        signal_values = compute_ema(macd_points, signal)
-        macd_index = 0
-        for index in range(len(values)):
-            if macd_line[index] is None:
-                continue
-            signal_line[index] = signal_values[macd_index]
-            macd_index += 1
-
-    return macd_line, signal_line
-
-
-def _crosses_series_above(
-    previous: float | None,
-    current: float | None,
-    previous_ref: float | None,
-    current_ref: float | None,
-) -> bool:
-    return (
-        previous is not None
-        and current is not None
-        and previous_ref is not None
-        and current_ref is not None
-        and previous <= previous_ref
-        and current > current_ref
-    )
-
-
-def _crosses_series_below(
-    previous: float | None,
-    current: float | None,
-    previous_ref: float | None,
-    current_ref: float | None,
-) -> bool:
-    return (
-        previous is not None
-        and current is not None
-        and previous_ref is not None
-        and current_ref is not None
-        and previous >= previous_ref
-        and current < current_ref
-    )
 
 
 def _run_long_backtest(
@@ -235,71 +139,6 @@ def _run_long_backtest(
         )
 
     return trades, equity_curve
-
-
-def backtest_ma_crossover(rows: list[dict], rule: TradingRule) -> BacktestResult:
-    fast = int(rule.parameters.get("fast_period", 50))
-    slow = int(rule.parameters.get("slow_period", 200))
-
-    closes = _closes(rows)
-    fast_ma = compute_sma(closes, fast)
-    slow_ma = compute_sma(closes, slow)
-    entries = [False] * len(rows)
-    exits = [False] * len(rows)
-
-    for index in range(1, len(rows)):
-        entries[index] = _crosses_series_above(
-            fast_ma[index - 1], fast_ma[index], slow_ma[index - 1], slow_ma[index]
-        )
-        exits[index] = _crosses_series_below(
-            fast_ma[index - 1], fast_ma[index], slow_ma[index - 1], slow_ma[index]
-        )
-
-    trades, equity = _run_long_backtest(rows, entries, exits)
-    return _build_result(rule, trades, equity, rows)
-
-
-def backtest_macd(rows: list[dict], rule: TradingRule) -> BacktestResult:
-    fast = int(rule.parameters.get("fast", 12))
-    slow = int(rule.parameters.get("slow", 26))
-    signal = int(rule.parameters.get("signal", 9))
-
-    closes = _closes(rows)
-    macd_line, signal_line = compute_macd(closes, fast, slow, signal)
-    entries = [False] * len(rows)
-    exits = [False] * len(rows)
-
-    for index in range(1, len(rows)):
-        entries[index] = _crosses_series_above(
-            macd_line[index - 1], macd_line[index], signal_line[index - 1], signal_line[index]
-        )
-        exits[index] = _crosses_series_below(
-            macd_line[index - 1], macd_line[index], signal_line[index - 1], signal_line[index]
-        )
-
-    trades, equity = _run_long_backtest(rows, entries, exits)
-    return _build_result(rule, trades, equity, rows)
-
-
-def backtest_breakout(rows: list[dict], rule: TradingRule) -> BacktestResult:
-    lookback = int(rule.parameters.get("lookback", 20))
-    highs = [float(row["high"]) for row in rows]
-    closes = _closes(rows)
-    entries = [False] * len(rows)
-    exits = [False] * len(rows)
-    entry_level: float | None = None
-
-    for index in range(lookback, len(rows)):
-        resistance = max(highs[index - lookback : index])
-        if closes[index] > resistance:
-            entries[index] = True
-            entry_level = closes[index]
-        elif entry_level is not None and closes[index] < entry_level:
-            exits[index] = True
-            entry_level = None
-
-    trades, equity = _run_long_backtest(rows, entries, exits)
-    return _build_result(rule, trades, equity, rows)
 
 
 def _swing_high_before(daily_rows: list[dict], day: str, lookback: int) -> float:
@@ -731,9 +570,9 @@ def backtest_liquidity_intraday(
     require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", True))
     require_liquidity_sweep = bool(rule.parameters.get("require_liquidity_sweep", False))
     require_signal_touches_line = bool(rule.parameters.get("require_signal_touches_line", False))
-    max_entry_distance_points = float(rule.parameters.get("max_entry_distance_from_line_points", 12.0))
+    max_entry_distance_points = float(rule.parameters.get("max_entry_distance_from_line_points", 8.0))
     max_minutes_after_touch = float(rule.parameters.get("max_minutes_after_liquidity_touch", 0.0))
-    allow_longs = bool(rule.parameters.get("allow_longs", False))
+    allow_longs = bool(rule.parameters.get("allow_longs", True))
     allow_shorts = bool(rule.parameters.get("allow_shorts", True))
     use_daily_trend_filter = bool(rule.parameters.get("use_daily_trend_filter", False))
     use_session_filter = bool(rule.parameters.get("use_session_filter", True))
@@ -1223,7 +1062,7 @@ def backtest_liquidity_intraday(
 
     result = _build_result(rule, trades, equity_curve, daily_rows, entry_based_win_rate=True)
     result.backtest_mode = (
-        "eth_100lots_youtube_swing" if use_swing_target_for_partial else "eth_100lots_filtered_entries"
+        "eth_100lots_swing" if use_swing_target_for_partial else "eth_100lots_filtered_entries"
     )
     result.rule_compliance = compliance
     return result
@@ -1279,19 +1118,11 @@ def backtest_rule(
     intraday_rows: list[dict] | None = None,
     daily_rows: list[dict] | None = None,
 ) -> BacktestResult:
-    if rule.strategy_type == "liquidity" and intraday_rows and daily_rows:
-        return backtest_liquidity_intraday(intraday_rows, daily_rows, rule)
-
-    runners = {
-        "ma_crossover": backtest_ma_crossover,
-        "macd": backtest_macd,
-        "breakout": backtest_breakout,
-        "liquidity": backtest_liquidity,
-    }
-    runner = runners.get(rule.strategy_type)
-    if runner is None:
+    if rule.strategy_type != "liquidity":
         raise ValueError(f"Unsupported strategy type: {rule.strategy_type}")
-    return runner(rows, rule)
+    if intraday_rows and daily_rows:
+        return backtest_liquidity_intraday(intraday_rows, daily_rows, rule)
+    return backtest_liquidity(rows, rule)
 
 
 def _build_result(

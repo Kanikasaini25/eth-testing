@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Streamlit UI for the YouTube strategy backtester."""
+"""Streamlit UI for the LQDTY strategy backtester."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 import streamlit as st
 
@@ -15,14 +16,15 @@ from src.charts import (
     render_trades_on_price,
     render_win_loss_summary,
 )
-from src.config import get_env
+from src.config import STRATEGIES_DIR, get_env
 from src.delta_data import CANDLES_PER_DAY_1M, expected_1m_candles
 from src.delta_trading import DeltaTradingClient, is_testnet_url
 from src.email_notify import is_email_configured, is_email_enabled, send_test_email
 from src.live_strategy import LiveLiquidityRunner, default_rules_path
+from src.pipeline import run_pipeline
 
 st.set_page_config(
-    page_title="YouTube Strategy Backtester",
+    page_title="Strategy Backtester",
     page_icon="📈",
     layout="wide",
 )
@@ -35,9 +37,18 @@ VERDICT_COLORS = {
 }
 
 
-def _default_url() -> str:
-    urls = get_env("YOUTUBE_URLS")
-    return urls.split(",")[0].strip() if urls else ""
+def _strategy_files() -> list[Path]:
+    if not STRATEGIES_DIR.exists():
+        return []
+    return sorted(STRATEGIES_DIR.glob("*.json"))
+
+
+def _default_strategy_name() -> str:
+    configured = get_env("STRATEGY_RULES")
+    if configured:
+        return Path(configured).name
+    files = _strategy_files()
+    return files[0].name if files else ""
 
 
 def _verdict_badge(verdict: str) -> str:
@@ -65,7 +76,7 @@ def _format_usd(amount: float) -> str:
     return f"${amount:+,.2f}"
 
 
-def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
+def _trades_table(result: BacktestResult) -> list[dict]:
     rows: list[dict] = []
     for trade in result.trades:
         pnl_usd = trade.pnl_usd
@@ -113,7 +124,7 @@ def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, 
 
 
 def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> list[dict]:
-    rows = _trades_table(result, starting_wallet)
+    rows = _trades_table(result)
     if not rows:
         return rows
     totals = _trades_totals(result, starting_wallet)
@@ -122,14 +133,14 @@ def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> 
             "Trade": "TOTAL",
             "Entry": "",
             "Exit": "",
-            "Entry Price": "",
-            "Exit Price": "",
-            "Entry Lots": "",
-            "Exit Lots": "",
-            "Points": "",
+            "Entry Price": None,
+            "Exit Price": None,
+            "Entry Lots": None,
+            "Exit Lots": None,
+            "Points": None,
             "P/L ($)": _format_usd(totals["net_usd"]),
             "P/L (lot-pts)": totals["total_lot_points"],
-            "Return %": "",
+            "Return %": None,
             "Wallet": _format_usd(totals["final_wallet"]),
             "Exit Reason": "",
         }
@@ -148,11 +159,22 @@ def _trade_type_from_side(side: str) -> str:
 def render_sidebar() -> dict:
     st.sidebar.header("Settings")
 
-    video_url = st.sidebar.text_input(
-        "YouTube URL",
-        value=_default_url(),
-        placeholder="https://www.youtube.com/watch?v=...",
-    )
+    strategy_files = _strategy_files()
+    strategy_names = [path.name for path in strategy_files]
+    selected_strategy = ""
+    if strategy_names:
+        default_name = _default_strategy_name()
+        default_index = (
+            strategy_names.index(default_name) if default_name in strategy_names else 0
+        )
+        selected_strategy = st.sidebar.selectbox(
+            "Strategy rules",
+            options=strategy_names,
+            index=default_index,
+            help="JSON files in data/strategies/",
+        )
+    else:
+        st.sidebar.warning("No strategy JSON files in data/strategies/")
 
     exchange = st.sidebar.selectbox(
         "Delta Exchange",
@@ -198,19 +220,16 @@ def render_sidebar() -> dict:
         step=100.0,
         help="Simulated account size; wallet column updates after each exit.",
     )
-    languages = st.sidebar.text_input("Transcript languages", value=get_env("LANGUAGES", "en"))
-
     run = st.sidebar.button("Run Analysis", type="primary", use_container_width=True)
 
     return {
         "run": run,
-        "video_url": video_url.strip(),
+        "rules_path": str(STRATEGIES_DIR / selected_strategy) if selected_strategy else "",
         "symbol": symbol.strip().upper(),
         "resolution": resolution,
         "days": days,
         "starting_wallet_usd": starting_wallet,
         "base_url": base_url,
-        "languages": [lang.strip() for lang in languages.split(",") if lang.strip()],
     }
 
 
@@ -218,7 +237,7 @@ def render_overview(result) -> None:
     st.subheader("Overview")
 
     cols = st.columns(5)
-    cols[0].metric("Video ID", result.video_id)
+    cols[0].metric("Strategy", result.strategy_id)
     cols[1].metric("Daily candles", len(result.ohlcv))
     if result.intraday_ohlcv:
         expected = expected_1m_candles(result.backtest_days)
@@ -387,13 +406,13 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
     st.caption(
         f"Runs the same liquidity rules as backtest on **{env_label}**. "
-        "Shorts only · body ≥ 75% · entry within 12 pts of previous-day high · "
+        "Long and short · body ≥ 75% · entry within 8 pts of the liquidity line · "
         "min R:R 2.5 · 100 lots · 80 partial @ +15 pts · 20 runner with 3 pt trail."
     )
 
     rules_path = default_rules_path()
     if not rules_path.exists():
-        st.warning("Run a backtest first to generate strategy rules, or add rules JSON manually.")
+        st.warning("Add a strategy JSON file under `data/strategies/` to run live.")
         return
 
     runner = LiveLiquidityRunner(symbol=symbol, base_url=base_url)
@@ -412,7 +431,7 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     st.markdown("**Active live rules**")
     st.json(
         {
-            "allow_longs": params.get("allow_longs", False),
+            "allow_longs": params.get("allow_longs", True),
             "allow_shorts": params.get("allow_shorts", True),
             "min_signal_body_ratio": params.get("min_signal_body_ratio"),
             "max_entry_distance_from_line_points": params.get(
@@ -509,10 +528,9 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
 
 
 def main() -> None:
-    st.title("YouTube Strategy Backtester")
+    st.title("Strategy Backtester")
     st.caption(
-        "Extract trading techniques from a YouTube tutorial and backtest them "
-        "on Delta Exchange ETH futures historical data."
+        "Backtest strategy rules from JSON on Delta Exchange ETH futures historical data."
     )
 
     settings = render_sidebar()
@@ -533,33 +551,31 @@ def main() -> None:
 
 def _render_backtest_page(settings: dict) -> None:
     if not settings["run"]:
-        st.info("Enter a YouTube URL in the sidebar and click **Run Analysis**.")
+        st.info("Select a strategy in the sidebar and click **Run Analysis**.")
         st.markdown(
             """
             ### How it works
-            1. Fetch YouTube transcript
-            2. Extract trading rules (MACD, MA crossover, breakout)
-            3. Download Delta Exchange OHLCV data
-            4. Backtest each technique on historical data
-            5. Show results and downloadable report
+            1. Load trading rules from `data/strategies/*.json`
+            2. Download Delta Exchange OHLCV data
+            3. Backtest each technique on historical data
+            4. Show results and downloadable report
             """
         )
         return
 
-    if not settings["video_url"]:
-        st.error("Please enter a YouTube URL.")
+    if not settings["rules_path"]:
+        st.error("Add a strategy JSON file under `data/strategies/` first.")
         return
 
     try:
         with st.spinner("Running pipeline..."):
             result = run_pipeline(
-                video_url=settings["video_url"],
+                rules_path=settings["rules_path"],
                 symbol=settings["symbol"],
                 resolution=settings["resolution"],
                 days=settings["days"],
                 starting_wallet_usd=settings["starting_wallet_usd"],
                 base_url=settings["base_url"],
-                languages=settings["languages"],
             )
     except Exception as exc:  # noqa: BLE001
         st.error(f"Pipeline failed: {exc}")
@@ -567,8 +583,8 @@ def _render_backtest_page(settings: dict) -> None:
 
     st.success("Analysis complete.")
 
-    tab_overview, tab_rules, tab_results, tab_charts, tab_trades, tab_transcript, tab_report = st.tabs(
-        ["Overview", "Rules", "Results", "Charts", "Trades", "Transcript", "Report"]
+    tab_overview, tab_rules, tab_results, tab_charts, tab_trades, tab_report = st.tabs(
+        ["Overview", "Rules", "Results", "Charts", "Trades", "Report"]
     )
 
     with tab_overview:
@@ -576,9 +592,9 @@ def _render_backtest_page(settings: dict) -> None:
         render_price_chart(result.ohlcv)
 
     with tab_rules:
-        st.subheader("Extracted Techniques")
+        st.subheader("Strategy Rules")
         if not result.rules:
-            st.warning("No supported techniques found in this transcript.")
+            st.warning("No rules found in this strategy file.")
         for rule in result.rules:
             with st.expander(rule.name, expanded=True):
                 st.write("**Type:**", rule.strategy_type)
@@ -598,9 +614,6 @@ def _render_backtest_page(settings: dict) -> None:
                         st.write(f"- {item}")
                 st.write("**Parameters**")
                 st.json(rule.parameters)
-                if rule.source_quotes:
-                    st.write("**Source quote**")
-                    st.caption(rule.source_quotes[0])
 
     with tab_results:
         st.subheader("Backtest Summary")
@@ -681,23 +694,19 @@ def _render_backtest_page(settings: dict) -> None:
                 else:
                     st.write("No trades generated.")
 
-    with tab_transcript:
-        st.subheader("Video Transcript")
-        st.text_area("Transcript", result.transcript, height=400)
-
     with tab_report:
         st.subheader("Full Report")
         st.markdown(result.report_content)
         st.download_button(
             "Download Markdown Report",
             data=result.report_content,
-            file_name=f"{result.video_id}_report.md",
+            file_name=f"{result.strategy_id}_report.md",
             mime="text/markdown",
         )
         st.download_button(
             "Download JSON Results",
             data=json.dumps([asdict(item) for item in result.results], indent=2),
-            file_name=f"{result.video_id}_results.json",
+            file_name=f"{result.strategy_id}_results.json",
             mime="application/json",
         )
 

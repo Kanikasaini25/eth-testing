@@ -18,7 +18,7 @@ from src.backtest import (
     _passes_liquidity_entry_filters,
     _signal_body_ratio,
 )
-from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs
+from src.config import LIVE_STATE_DIR, PROJECT_DIR, STRATEGIES_DIR, ensure_data_dirs, get_env
 from src.delta_data import DeltaExchangeClient
 from src.delta_trading import DeltaTradingClient
 from src.email_notify import (
@@ -27,7 +27,7 @@ from src.email_notify import (
     send_runner_exit_email,
     send_stop_loss_email,
 )
-from src.rule_extractor import TradingRule, rules_from_json
+from src.rule_extractor import TradingRule, load_rules
 
 STOP_TICK_SIZE = 0.05
 
@@ -106,14 +106,18 @@ class LiveTickResult:
 
 
 def default_rules_path() -> Path:
-    return STRATEGIES_DIR / "wI9b968AvW8_rules.json"
+    configured = get_env("STRATEGY_RULES")
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = PROJECT_DIR / path
+        return path
+    return STRATEGIES_DIR / "lqdty_liquidity.json"
 
 
 def load_liquidity_rule(path: Path | None = None) -> TradingRule:
     rules_path = path or default_rules_path()
-    if not rules_path.exists():
-        raise FileNotFoundError(f"Strategy rules not found: {rules_path}")
-    rules = rules_from_json(rules_path.read_text(encoding="utf-8"))
+    rules = load_rules(rules_path)
     for rule in rules:
         if rule.strategy_type == "liquidity":
             return rule
@@ -667,9 +671,9 @@ class LiveLiquidityRunner:
         require_close_beyond_signal = bool(params.get("require_close_beyond_signal", True))
         require_liquidity_sweep = bool(params.get("require_liquidity_sweep", False))
         require_signal_touches_line = bool(params.get("require_signal_touches_line", False))
-        max_entry_distance_points = float(params.get("max_entry_distance_from_line_points", 12.0))
+        max_entry_distance_points = float(params.get("max_entry_distance_from_line_points", 8.0))
         max_minutes_after_touch = float(params.get("max_minutes_after_liquidity_touch", 0.0))
-        allow_longs = bool(params.get("allow_longs", False))
+        allow_longs = bool(params.get("allow_longs", True))
         allow_shorts = bool(params.get("allow_shorts", True))
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
         use_session_filter = bool(params.get("use_session_filter", True))

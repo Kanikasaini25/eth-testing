@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Full pipeline:
-1. Fetch YouTube transcript
-2. Extract trading techniques from transcript
-3. Download Delta Exchange ETH futures 1d OHLCV
-4. Backtest extracted rules on historical data
-5. Save report
+1. Load trading rules from a strategy JSON file
+2. Download Delta Exchange ETH futures OHLCV
+3. Backtest rules on historical data
+4. Save report
 """
 
 from __future__ import annotations
@@ -14,18 +13,18 @@ import argparse
 import json
 import sys
 
-from src.config import get_env
+from src.config import STRATEGIES_DIR, get_env
 from src.pipeline import run_pipeline
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Backtest YouTube trading techniques on Delta Exchange ETH futures data."
+        description="Backtest strategy rules on Delta Exchange ETH futures data."
     )
     parser.add_argument(
-        "--url",
-        default=get_env("YOUTUBE_URLS").split(",")[0] if get_env("YOUTUBE_URLS") else "",
-        help="YouTube video URL",
+        "--rules",
+        default=get_env("STRATEGY_RULES", str(STRATEGIES_DIR / "lqdty_liquidity.json")),
+        help="Path to strategy rules JSON",
     )
     parser.add_argument(
         "--symbol",
@@ -60,31 +59,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    if not args.url:
-        print("Error: Provide --url or set YOUTUBE_URLS in .env", file=sys.stderr)
+    if not args.rules:
+        print("Error: Provide --rules or set STRATEGY_RULES in .env", file=sys.stderr)
         return 1
 
-    languages = [
-        lang.strip() for lang in get_env("LANGUAGES", "en").split(",") if lang.strip()
-    ]
-
-    print("Step 1/5: Fetching YouTube transcript...")
-    print("Step 2/5: Extracting trading rules from transcript...")
-    print("Step 3/5: Downloading Delta Exchange OHLCV data...")
-    print("Step 4/5: Running backtests...")
-    print("Step 5/5: Generating report...")
+    print("Step 1/4: Loading strategy rules...")
+    print("Step 2/4: Downloading Delta Exchange OHLCV data...")
+    print("Step 3/4: Running backtests...")
+    print("Step 4/4: Generating report...")
 
     result = run_pipeline(
-        video_url=args.url,
+        rules_path=args.rules,
         symbol=args.symbol,
         resolution=args.resolution,
         days=args.days,
         starting_wallet_usd=args.starting_wallet,
         base_url=args.base_url,
-        languages=languages,
     )
 
-    print(f"  Transcript -> {result.transcript_path}")
     print(f"  Rules      -> {result.rules_path}")
     print(f"  OHLCV      -> {result.ohlcv_path}")
     print(f"  Report     -> {result.report_path}")

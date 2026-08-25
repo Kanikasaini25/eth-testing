@@ -6,39 +6,49 @@ from pathlib import Path
 from src.backtest import BacktestResult, backtest_rule
 from src.config import (
     OHLCV_DIR,
+    PROJECT_DIR,
     REPORTS_DIR,
     STRATEGIES_DIR,
-    TRANSCRIPTS_DIR,
     ensure_data_dirs,
 )
 from src.delta_data import (
     DeltaExchangeClient,
-    expected_1m_candles,
     save_ohlcv,
     trim_ohlcv_to_days,
 )
 from src.report import generate_report, save_report, save_results_json
-from src.rule_extractor import TradingRule, extract_rules_from_transcript, rules_to_json
-from src.youtube_transcript import fetch_transcript_text
+from src.rule_extractor import TradingRule, load_rules, rules_to_json
 
 
 @dataclass
 class PipelineResult:
-    video_id: str
-    video_url: str
-    transcript: str
+    strategy_id: str
     rules: list[TradingRule]
     rules_json: str
     ohlcv: list[dict]
     results: list[BacktestResult]
     report_content: str
-    transcript_path: Path
     rules_path: Path
     ohlcv_path: Path
     report_path: Path
     results_path: Path
     backtest_days: int = 0
     intraday_ohlcv: list[dict] | None = None
+
+
+def resolve_rules_path(rules_path: str | Path) -> Path:
+    path = Path(rules_path)
+    if path.exists():
+        return path.resolve()
+    candidates = [
+        PROJECT_DIR / path,
+        STRATEGIES_DIR / path,
+        STRATEGIES_DIR / path.name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Strategy rules not found: {rules_path}")
 
 
 def _clamp_backtest_days(days: int) -> int:
@@ -53,33 +63,20 @@ def _daily_rows_for_intraday(daily_rows: list[dict], intraday_rows: list[dict]) 
 
 
 def run_pipeline(
-    video_url: str,
+    rules_path: str | Path,
     symbol: str = "ETHUSD",
     resolution: str = "1d",
     days: int = 30,
     base_url: str = "https://api.india.delta.exchange",
-    languages: list[str] | None = None,
     starting_wallet_usd: float = 10_000,
 ) -> PipelineResult:
     ensure_data_dirs()
-    languages = languages or ["en"]
     backtest_days = _clamp_backtest_days(days)
 
-    transcript_data = fetch_transcript_text(video_url, languages=languages)
-    video_id = transcript_data["video_id"]
-
-    transcript_path = TRANSCRIPTS_DIR / f"{video_id}.txt"
-    transcript_path.write_text(transcript_data["text"], encoding="utf-8")
-
-    rules = extract_rules_from_transcript(transcript_data["text"])
-    if not rules:
-        raise ValueError(
-            "No supported trading techniques found in transcript. "
-            "The video should mention MACD, moving average crossover, or breakout."
-        )
+    resolved_rules_path = resolve_rules_path(rules_path)
+    rules = load_rules(resolved_rules_path)
     rules_json = rules_to_json(rules)
-    rules_path = STRATEGIES_DIR / f"{video_id}_rules.json"
-    rules_path.write_text(rules_json, encoding="utf-8")
+    strategy_id = resolved_rules_path.stem
 
     client = DeltaExchangeClient(base_url=base_url)
     has_liquidity = any(rule.strategy_type == "liquidity" for rule in rules)
@@ -121,29 +118,25 @@ def run_pipeline(
             results.append(backtest_rule(ohlcv, rule))
 
     report_content = generate_report(
-        video_url=video_url,
-        transcript=transcript_data["text"],
+        strategy_id=strategy_id,
         rules_json=rules_json,
         results=results,
         symbol=symbol,
         resolution=resolution,
     )
-    report_path = REPORTS_DIR / f"{video_id}_report.md"
-    results_path = REPORTS_DIR / f"{video_id}_results.json"
+    report_path = REPORTS_DIR / f"{strategy_id}_report.md"
+    results_path = REPORTS_DIR / f"{strategy_id}_results.json"
     save_report(report_content, report_path)
     save_results_json(results, results_path)
 
     return PipelineResult(
-        video_id=video_id,
-        video_url=video_url,
-        transcript=transcript_data["text"],
+        strategy_id=strategy_id,
         rules=rules,
         rules_json=rules_json,
         ohlcv=ohlcv,
         results=results,
         report_content=report_content,
-        transcript_path=transcript_path,
-        rules_path=rules_path,
+        rules_path=resolved_rules_path,
         ohlcv_path=ohlcv_path,
         report_path=report_path,
         results_path=results_path,

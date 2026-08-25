@@ -86,13 +86,14 @@ def send_entry_signal_email(
     entry_ts: str,
     upper_level: float | None = None,
     lower_level: float | None = None,
+    strategy_name: str = "LQDTY Liquidity Strategy",
 ) -> EmailResult:
     trade_label = "BUY (LONG)" if side == "long" else "SELL (SHORT)"
-    subject = f"LQDTY Entry Signal: {trade_label} {symbol} @ {entry_price:.2f}"
+    subject = f"{strategy_name} Entry: {trade_label} {symbol} @ {entry_price:.2f}"
 
     body = "\n".join(
         [
-            "LQDTY Liquidity Strategy — Entry Signal",
+            f"{strategy_name} — Entry Signal",
             "",
             f"Symbol:      {symbol}",
             f"Signal:      {trade_label}",
@@ -157,6 +158,7 @@ def send_stop_loss_email(
     stop_loss: float,
     exit_type: str = "stop_loss",
     partial_was_taken: bool = False,
+    strategy_name: str = "LQDTY Liquidity Strategy",
 ) -> EmailResult:
     trade_label = "LONG" if side == "long" else "SHORT"
     points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
@@ -167,11 +169,11 @@ def send_stop_loss_email(
         "exchange_stop": "Stop Loss Hit (Exchange)",
     }
     headline = label_map.get(exit_type, "Stop Loss Hit")
-    subject = f"LQDTY {headline}: {lots} lots {symbol} @ {exit_price:.2f}"
+    subject = f"{strategy_name} {headline}: {lots} lots {symbol} @ {exit_price:.2f}"
 
     body = "\n".join(
         [
-            f"LQDTY Liquidity Strategy — {headline}",
+            f"{strategy_name} — {headline}",
             "",
             f"Symbol:         {symbol}",
             f"Side:           {trade_label}",
@@ -216,8 +218,40 @@ def send_runner_exit_email(
     return send_email(subject, body)
 
 
+def send_take_profit_email(
+    *,
+    symbol: str,
+    side: str,
+    entry_price: float,
+    exit_price: float,
+    lots: int,
+    target: float,
+    strategy_name: str = "15m Previous-Day POC",
+) -> EmailResult:
+    trade_label = "LONG" if side == "long" else "SHORT"
+    points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
+    subject = f"{strategy_name} Take Profit: {lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
+
+    body = "\n".join(
+        [
+            f"{strategy_name} — Take Profit",
+            "",
+            f"Symbol:       {symbol}",
+            f"Side:         {trade_label}",
+            f"Entry price:  {entry_price:.2f}",
+            f"Target:       {target:.2f}",
+            f"Exit price:   {exit_price:.2f}",
+            f"Lots closed:  {lots}",
+            f"Points:       {points:.2f}",
+            "",
+            "Full position closed on Delta Exchange.",
+        ]
+    )
+    return send_email(subject, body)
+
+
 def send_test_email() -> EmailResult:
     return send_email(
-        subject="LQDTY Strategy — Test Email",
-        body="This is a test email from your YouTube Strategy Backtester live alerts.",
+        subject="Strategy Backtester — Test Email",
+        body="This is a test email from your Strategy Backtester live alerts.",
     )

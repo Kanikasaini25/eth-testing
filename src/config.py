@@ -13,6 +13,9 @@ STRATEGIES_DIR = DATA_DIR / "strategies"
 REPORTS_DIR = DATA_DIR / "reports"
 LIVE_STATE_DIR = DATA_DIR / "live"
 
+# Real India ETHUSD history for backtests. Demo/live orders still use DELTA_BASE_URL.
+DELTA_BACKTEST_BASE_URL = "https://api.india.delta.exchange"
+
 load_dotenv(ENV_FILE)
 
 

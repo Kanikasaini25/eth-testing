@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from pathlib import Path
 
 import streamlit as st
 
@@ -16,12 +15,12 @@ from src.charts import (
     render_trades_on_price,
     render_win_loss_summary,
 )
-from src.config import STRATEGIES_DIR, get_env
+from src.config import DELTA_BACKTEST_BASE_URL, get_env
 from src.delta_data import CANDLES_PER_DAY_1M, expected_1m_candles
 from src.delta_trading import DeltaTradingClient, is_testnet_url
-from src.email_notify import is_email_configured, is_email_enabled, send_test_email
-from src.live_strategy import LiveLiquidityRunner, default_rules_path
+from src.live_strategy import default_rules_path
 from src.pipeline import run_pipeline
+from src.ui_poc_backtest import render_poc_backtest_page
 
 st.set_page_config(
     page_title="Strategy Backtester",
@@ -35,20 +34,6 @@ VERDICT_COLORS = {
     "Fails": "red",
     "No trades generated": "gray",
 }
-
-
-def _strategy_files() -> list[Path]:
-    if not STRATEGIES_DIR.exists():
-        return []
-    return sorted(STRATEGIES_DIR.glob("*.json"))
-
-
-def _default_strategy_name() -> str:
-    configured = get_env("STRATEGY_RULES")
-    if configured:
-        return Path(configured).name
-    files = _strategy_files()
-    return files[0].name if files else ""
 
 
 def _verdict_badge(verdict: str) -> str:
@@ -157,24 +142,7 @@ def _trade_type_from_side(side: str) -> str:
 
 
 def render_sidebar() -> dict:
-    st.sidebar.header("Settings")
-
-    strategy_files = _strategy_files()
-    strategy_names = [path.name for path in strategy_files]
-    selected_strategy = ""
-    if strategy_names:
-        default_name = _default_strategy_name()
-        default_index = (
-            strategy_names.index(default_name) if default_name in strategy_names else 0
-        )
-        selected_strategy = st.sidebar.selectbox(
-            "Strategy rules",
-            options=strategy_names,
-            index=default_index,
-            help="JSON files in data/strategies/",
-        )
-    else:
-        st.sidebar.warning("No strategy JSON files in data/strategies/")
+    st.sidebar.header("Account")
 
     exchange = st.sidebar.selectbox(
         "Delta Exchange",
@@ -192,43 +160,14 @@ def render_sidebar() -> dict:
     }
     base_url = exchange_urls[exchange]
     default_symbol = "ETHUSD" if exchange != "Global" else "ETHUSDT"
-
     symbol = st.sidebar.text_input("Symbol", value=get_env("DELTA_SYMBOL", default_symbol))
-    resolution = st.sidebar.selectbox(
-        "Timeframe",
-        options=["1d", "4h", "1h", "15m"],
-        index=0,
-    )
-    days = st.sidebar.slider(
-        "Backtest days (1d lines + 1m entries)",
-        min_value=1,
-        max_value=365,
-        value=min(365, int(get_env("BACKTEST_DAYS", "30"))),
-        step=1,
-        help=f"Same period for daily liquidity lines and 1m execution. "
-        f"1 day = {CANDLES_PER_DAY_1M} one-minute candles.",
-    )
     st.sidebar.caption(
-        f"**{days} days** → ~**{expected_1m_candles(days):,}** 1m candles "
-        f"({CANDLES_PER_DAY_1M} per day)"
+        "Demo Account uses this exchange. Both backtests always use India live history "
+        "(`api.india.delta.exchange`)."
     )
-    starting_wallet = st.sidebar.number_input(
-        "Starting wallet (USD)",
-        min_value=100.0,
-        max_value=10_000_000.0,
-        value=float(get_env("STARTING_WALLET_USD", "10000")),
-        step=100.0,
-        help="Simulated account size; wallet column updates after each exit.",
-    )
-    run = st.sidebar.button("Run Analysis", type="primary", use_container_width=True)
 
     return {
-        "run": run,
-        "rules_path": str(STRATEGIES_DIR / selected_strategy) if selected_strategy else "",
         "symbol": symbol.strip().upper(),
-        "resolution": resolution,
-        "days": days,
-        "starting_wallet_usd": starting_wallet,
         "base_url": base_url,
     }
 
@@ -401,187 +340,87 @@ def render_demo_account(symbol: str, base_url: str) -> None:
     )
 
 
-def render_live_strategy(symbol: str, base_url: str) -> None:
-    st.subheader("LQDTY Live Strategy → Demo Account")
-    env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
-    st.caption(
-        f"Runs the same liquidity rules as backtest on **{env_label}**. "
-        "Long and short · body ≥ 75% · entry within 8 pts of the liquidity line · "
-        "min R:R 2.5 · 100 lots · 80 partial @ +15 pts · 20 runner with 3 pt trail."
-    )
-
-    rules_path = default_rules_path()
-    if not rules_path.exists():
-        st.warning("Add a strategy JSON file under `data/strategies/` to run live.")
-        return
-
-    runner = LiveLiquidityRunner(symbol=symbol, base_url=base_url)
-    state = runner.state
-
-    enabled = st.toggle(
-        "Strategy enabled",
-        value=state.enabled,
-        key="live_strategy_enabled",
-        help="When enabled, each tick scans for LQDTY signals and manages open positions.",
-    )
-    if enabled != state.enabled:
-        runner.set_enabled(enabled)
-
-    params = runner.rule.parameters
-    st.markdown("**Active live rules**")
-    st.json(
-        {
-            "allow_longs": params.get("allow_longs", True),
-            "allow_shorts": params.get("allow_shorts", True),
-            "min_signal_body_ratio": params.get("min_signal_body_ratio"),
-            "max_entry_distance_from_line_points": params.get(
-                "max_entry_distance_from_line_points"
-            ),
-            "min_reward_to_risk": params.get("min_reward_to_risk"),
-            "min_stop_loss_points": params.get("min_stop_loss_points"),
-            "max_stop_loss_points": params.get("max_stop_loss_points"),
-            "partial_target_points": params.get("partial_target_points"),
-            "session_hours_utc": (
-                f"{params.get('session_start_hour_utc')}:00–"
-                f"{params.get('session_end_hour_utc')}:00"
-            ),
-        }
-    )
-
-    tick_col1, tick_col2, tick_col3 = st.columns(3)
-    with tick_col1:
-        run_live = st.button("Run strategy tick", type="primary", key="run_live_tick")
-    with tick_col2:
-        dry_run = st.checkbox("Dry run (no orders)", key="live_dry_run")
-    with tick_col3:
-        st.caption(f"Rules: `{rules_path.name}`")
-
-    if run_live:
-        with st.spinner("Running live strategy tick..."):
-            tick_result = runner.tick(dry_run=dry_run)
-            st.session_state["live_tick_result"] = tick_result
-            st.session_state["live_runner_state"] = runner.state
-
-    tick_result = st.session_state.get("live_tick_result")
-    if tick_result is not None:
-        if tick_result.success:
-            st.success("Tick completed")
-            for action in tick_result.actions:
-                st.write(f"- {action}")
-        else:
-            st.error(f"Tick failed: {tick_result.error}")
-
-    state = st.session_state.get("live_runner_state", runner.state)
-    level_col1, level_col2, level_col3, level_col4 = st.columns(4)
-    level_col1.metric("Upper line (prev day high)", state.upper_level or "—")
-    level_col2.metric("Lower line (prev day low)", state.lower_level or "—")
-    if tick_result and tick_result.mark_price:
-        level_col3.metric("Mark price", f"${tick_result.mark_price:,.2f}")
-    level_col4.metric("Exchange position", tick_result.exchange_position if tick_result else "—")
-
-    st.markdown("**Session state**")
-    st.json(
-        {
-            "enabled": state.enabled,
-            "touched_upper": state.session.touched_upper,
-            "touched_lower": state.session.touched_lower,
-            "trades_in_sequence": state.session.trades_in_sequence,
-            "full_sl_count": state.session.full_sl_count,
-            "upper_line_blocked": state.session.upper_line_blocked,
-            "lower_line_blocked": state.session.lower_line_blocked,
-            "last_processed_ts": state.session.last_processed_ts,
-        }
-    )
-
-    st.markdown("**Tracked position**")
-    if state.position:
-        st.json(asdict(state.position))
-    else:
-        st.write("Flat — waiting for LQDTY entry signal.")
-
-    st.markdown("**Recent logs**")
-    if state.logs:
-        for entry in reversed(state.logs[-15:]):
-            st.caption(entry)
-    else:
-        st.write("No live actions yet.")
-
-    st.markdown("**Email alerts**")
-    if is_email_configured():
-        st.success(f"SMTP enabled → alerts go to `{get_env('NOTIFY_EMAIL')}`")
-        if st.button("Send test email", key="send_test_email"):
-            with st.spinner("Sending test email..."):
-                result = send_test_email()
-            if result.success:
-                st.success(result.message)
-            else:
-                st.error(result.message)
-    elif is_email_enabled():
-        st.warning("Email enabled but SMTP settings incomplete. Update `.env` file.")
-    else:
-        st.info("Set `EMAIL_NOTIFY_ENABLED=true` and SMTP settings in `.env` for entry alerts.")
-
-    st.info(
-        "Click **Run strategy tick** every minute (or use "
-        "`python scripts/run_live_strategy.py --loop`) to keep the strategy running."
-    )
-
-
 def main() -> None:
     st.title("Strategy Backtester")
     st.caption(
-        "Backtest strategy rules from JSON on Delta Exchange ETH futures historical data."
+        "Test LQDTY (1d/1m) and 15m POC separately. Each tab has its own rules and results."
     )
 
     settings = render_sidebar()
-
-    demo_tab, live_tab, backtest_tab = st.tabs(
-        ["Demo Account", "Live Strategy", "Backtest"]
+    demo_tab, lqdty_tab, poc_tab = st.tabs(
+        ["Demo Account", "Backtest 1d / 1m", "Backtest 15m"]
     )
 
     with demo_tab:
         render_demo_account(settings["symbol"], settings["base_url"])
 
-    with live_tab:
-        render_live_strategy(settings["symbol"], settings["base_url"])
+    with lqdty_tab:
+        _render_lqdty_backtest_page(settings)
 
-    with backtest_tab:
-        _render_backtest_page(settings)
+    with poc_tab:
+        render_poc_backtest_page(settings["symbol"], settings["base_url"])
 
 
-def _render_backtest_page(settings: dict) -> None:
-    if not settings["run"]:
-        st.info("Select a strategy in the sidebar and click **Run Analysis**.")
-        st.markdown(
-            """
-            ### How it works
-            1. Load trading rules from `data/strategies/*.json`
-            2. Download Delta Exchange OHLCV data
-            3. Backtest each technique on historical data
-            4. Show results and downloadable report
-            """
+def _render_lqdty_backtest_page(settings: dict) -> None:
+    st.subheader("LQDTY Backtest (1d lines + 1m entries)")
+    rules_path = default_rules_path()
+    st.caption(
+        f"Previous-day high/low on 1d, entries on 1m. Rules: `{rules_path.name}`. "
+        "Candles: **India live** (`api.india.delta.exchange`) — real ETHUSD history, not testnet."
+    )
+    if not rules_path.exists():
+        st.error(f"LQDTY rules not found: `{rules_path}`")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        days = st.slider(
+            "Backtest days (1d lines + 1m entries)",
+            min_value=1,
+            max_value=365,
+            value=min(365, int(get_env("BACKTEST_DAYS", "30"))),
+            step=1,
+            key="lqdty_days",
+            help=f"1 day = {CANDLES_PER_DAY_1M} one-minute candles.",
         )
+        st.caption(
+            f"**{days} days** → ~**{expected_1m_candles(days):,}** 1m candles"
+        )
+    with col2:
+        starting_wallet = st.number_input(
+            "Starting wallet (USD)",
+            min_value=100.0,
+            max_value=10_000_000.0,
+            value=float(get_env("STARTING_WALLET_USD", "10000")),
+            step=100.0,
+            key="lqdty_wallet",
+        )
+
+    run = st.button("Run 1d / 1m backtest", type="primary", key="run_lqdty_backtest")
+    if run:
+        try:
+            with st.spinner("Running LQDTY pipeline (1d + 1m)..."):
+                result = run_pipeline(
+                    rules_path=str(rules_path),
+                    symbol=settings["symbol"],
+                    resolution="1d",
+                    days=days,
+                    starting_wallet_usd=starting_wallet,
+                    base_url=DELTA_BACKTEST_BASE_URL,
+                )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"LQDTY backtest failed: {exc}")
+            return
+        st.session_state["lqdty_pipeline_result"] = result
+        st.session_state["lqdty_starting_wallet"] = starting_wallet
+
+    result = st.session_state.get("lqdty_pipeline_result")
+    if result is None:
+        st.info("Click **Run 1d / 1m backtest** to test LQDTY on its own.")
         return
 
-    if not settings["rules_path"]:
-        st.error("Add a strategy JSON file under `data/strategies/` first.")
-        return
-
-    try:
-        with st.spinner("Running pipeline..."):
-            result = run_pipeline(
-                rules_path=settings["rules_path"],
-                symbol=settings["symbol"],
-                resolution=settings["resolution"],
-                days=settings["days"],
-                starting_wallet_usd=settings["starting_wallet_usd"],
-                base_url=settings["base_url"],
-            )
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Pipeline failed: {exc}")
-        return
-
-    st.success("Analysis complete.")
+    starting_wallet = st.session_state.get("lqdty_starting_wallet", starting_wallet)
+    st.success("LQDTY analysis complete.")
 
     tab_overview, tab_rules, tab_results, tab_charts, tab_trades, tab_report = st.tabs(
         ["Overview", "Rules", "Results", "Charts", "Trades", "Report"]
@@ -665,7 +504,7 @@ def _render_backtest_page(settings: dict) -> None:
 
     with tab_trades:
         st.subheader("Trade Log")
-        starting_wallet = settings["starting_wallet_usd"]
+        starting_wallet = st.session_state.get("lqdty_starting_wallet", starting_wallet)
         for backtest in result.results:
             with st.expander(f"{backtest.rule_name} ({len(backtest.trades)} exits)", expanded=True):
                 if backtest.trades:

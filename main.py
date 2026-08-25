@@ -13,7 +13,7 @@ import argparse
 import json
 import sys
 
-from src.config import STRATEGIES_DIR, get_env
+from src.config import DELTA_BACKTEST_BASE_URL, STRATEGIES_DIR, get_env
 from src.pipeline import run_pipeline
 
 
@@ -50,8 +50,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-url",
-        default=get_env("DELTA_BASE_URL", "https://api.india.delta.exchange"),
-        help="Delta Exchange API base URL",
+        default=DELTA_BACKTEST_BASE_URL,
+        help="Candle API for backtests (default: India live ETHUSD history)",
     )
     return parser.parse_args()
 

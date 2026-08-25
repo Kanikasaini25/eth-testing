@@ -1,13 +1,12 @@
 # Strategy Backtester
 
-Backtest trading strategy rules on **Delta Exchange ETH futures** historical data.
+Backtest trading strategy rules on **Delta Exchange ETH futures**.
 
 ## What it does
 
 1. Loads trading rules from `data/strategies/*.json`
-2. Downloads **ETHUSD 1d** candles from Delta Exchange
-3. Backtests each technique on historical data
-4. Saves a markdown report + JSON results
+2. Downloads ETHUSD candles from Delta Exchange
+3. Backtests **LQDTY (1d/1m)** and **15m POC** in separate Streamlit tabs
 
 ## Setup
 
@@ -18,7 +17,10 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your Delta settings. Point `STRATEGY_RULES` at a JSON file in `data/strategies/` if you want a default other than `lqdty_liquidity.json`.
+Edit `.env` with your Delta settings.
+
+- `STRATEGY_RULES` — 1d/1m LQDTY JSON (default `lqdty_liquidity.json`)
+- `STRATEGY_M15_RULES` — 15m POC JSON (default `wI9b968AvW8_rules.json`)
 
 ## Run with Streamlit UI
 
@@ -26,18 +28,28 @@ Edit `.env` with your Delta settings. Point `STRATEGY_RULES` at a JSON file in `
 streamlit run app.py
 ```
 
-Open the app, pick a strategy JSON in the sidebar, and click **Run Analysis**.
+Tabs:
+
+- **Demo Account** — wallet, position, test orders
+- **Backtest 1d / 1m** — LQDTY previous-day high/low + 1m entries
+- **Backtest 15m** — previous-day POC reaction
+
+Each backtest tab has its own Run button, rules file, and saved results. Running one does not overwrite the other.
+
+Both backtests download candles from **India live** (`https://api.india.delta.exchange`) — real ETHUSD history. The Demo Account / live bot still uses `DELTA_BASE_URL` (testnet unless you change it).
+
+## Run live from CLI
+
+```bash
+python scripts/run_live_strategy.py --strategy lqdty --loop --enable
+python scripts/run_live_strategy.py --strategy m15 --loop --enable
+```
 
 ## Run full pipeline (CLI)
 
 ```bash
-python main.py
-```
-
-Or with options:
-
-```bash
 python main.py --rules data/strategies/lqdty_liquidity.json --symbol ETHUSD --days 365
+python main.py --rules data/strategies/wI9b968AvW8_rules.json --symbol ETHUSD --days 90
 ```
 
 ## Output
@@ -45,24 +57,26 @@ python main.py --rules data/strategies/lqdty_liquidity.json --symbol ETHUSD --da
 | File | Description |
 |------|-------------|
 | `data/strategies/*.json` | Strategy rules (source of truth) |
-| `data/ohlcv/ETHUSD_1d.csv` | Delta Exchange candle data |
+| `data/ohlcv/ETHUSD_1d.csv` | Daily candles |
+| `data/ohlcv/ETHUSD_1m.csv` | 1m candles (LQDTY) |
+| `data/ohlcv/ETHUSD_15m.csv` | 15m candles (POC) |
 | `data/reports/{strategy}_report.md` | Backtest report |
 | `data/reports/{strategy}_results.json` | Raw backtest metrics |
 
-## Included strategy
+## Included strategies
 
 | File | Strategy |
 |------|----------|
-| `data/strategies/lqdty_liquidity.json` | LQDTY liquidity (1D levels + 1m shorts) |
-
-Add another JSON file under `data/strategies/` to backtest additional rules.
+| `data/strategies/lqdty_liquidity.json` | LQDTY liquidity (1d levels + 1m entries) |
+| `data/strategies/wI9b968AvW8_rules.json` | 15m previous-day POC reaction |
 
 ## Delta Exchange
 
-- **India:** `https://api.india.delta.exchange` → symbol `ETHUSD`
+- **India demo:** `https://cdn-ind.testnet.deltaex.org` → symbol `ETHUSD`
+- **India live:** `https://api.india.delta.exchange` → symbol `ETHUSD`
 - **Global:** `https://api.delta.exchange` → symbol `ETHUSDT`
 
-No API key required for historical candle data.
+No API key required for historical candle data. Demo trading needs `DELTA_API_KEY` and `DELTA_API_SECRET`.
 
 ## Disclaimer
 

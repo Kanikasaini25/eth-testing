@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 from src.rule_extractor import TradingRule
 
@@ -530,6 +531,28 @@ def _liquidity_sweep_at_lower(low: float, close: float, lower: float) -> bool:
     return low < lower and close > lower
 
 
+def _minutes_between(start_ts: str, end_ts: str) -> float:
+    start = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+    return max((end - start).total_seconds() / 60.0, 0.0)
+
+
+def _near_liquidity_line(price: float, line: float, max_points: float) -> bool:
+    if max_points <= 0:
+        return True
+    return abs(price - line) <= max_points
+
+
+def _liquidity_timing_ok(
+    first_touch_ts: str,
+    signal_ts: str,
+    max_minutes_after_touch: float,
+) -> bool:
+    if max_minutes_after_touch <= 0 or not first_touch_ts:
+        return True
+    return _minutes_between(first_touch_ts, signal_ts) <= max_minutes_after_touch
+
+
 def _liquidity_targets(
     side: str,
     entry_price: float,
@@ -588,6 +611,10 @@ def _passes_liquidity_entry_filters(
     use_session_filter: bool = False,
     session_start_hour_utc: int = 8,
     session_end_hour_utc: int = 20,
+    require_signal_touches_line: bool = False,
+    max_entry_distance_points: float = 0.0,
+    max_minutes_after_touch: float = 0.0,
+    first_touch_ts: str = "",
 ) -> bool:
     if not _liquidity_entry_valid(
         side,
@@ -611,7 +638,42 @@ def _passes_liquidity_entry_filters(
             return False
         if side == "long" and not _liquidity_sweep_at_lower(signal_low, signal_close, lower):
             return False
-    return True
+    return _passes_liquidity_proximity_filters(
+        side=side,
+        entry_price=entry_price,
+        timestamp=timestamp,
+        signal_high=signal_high,
+        signal_low=signal_low,
+        upper=upper,
+        lower=lower,
+        first_touch_ts=first_touch_ts,
+        require_signal_touches_line=require_signal_touches_line,
+        max_entry_distance_points=max_entry_distance_points,
+        max_minutes_after_touch=max_minutes_after_touch,
+    )
+
+
+def _passes_liquidity_proximity_filters(
+    *,
+    side: str,
+    entry_price: float,
+    timestamp: str,
+    signal_high: float,
+    signal_low: float,
+    upper: float,
+    lower: float,
+    first_touch_ts: str,
+    require_signal_touches_line: bool,
+    max_entry_distance_points: float,
+    max_minutes_after_touch: float,
+) -> bool:
+    line_price = upper if side == "short" else lower
+    signal_touches = signal_high >= upper if side == "short" else signal_low <= lower
+    if require_signal_touches_line and not signal_touches:
+        return False
+    if not _near_liquidity_line(entry_price, line_price, max_entry_distance_points):
+        return False
+    return _liquidity_timing_ok(first_touch_ts, timestamp, max_minutes_after_touch)
 
 
 def _bar_prices_sane(row: dict, ref_price: float, max_deviation_pct: float = 15.0) -> bool:
@@ -662,12 +724,17 @@ def backtest_liquidity_intraday(
     max_entries_per_line = int(rule.parameters.get("max_entries_per_liquidity_line_per_day", 1))
     min_sl_points = float(rule.parameters.get("min_stop_loss_points", 4.0))
     max_sl_points = float(rule.parameters.get("max_stop_loss_points", 7.0))
-    min_reward_to_risk = float(rule.parameters.get("min_reward_to_risk", 1.5))
-    min_signal_body_ratio = float(rule.parameters.get("min_signal_body_ratio", 0.55))
+    min_reward_to_risk = float(rule.parameters.get("min_reward_to_risk", 2.5))
+    min_signal_body_ratio = float(rule.parameters.get("min_signal_body_ratio", 0.75))
     min_signal_range_points = float(rule.parameters.get("min_signal_range_points", 3.5))
     entry_on_next_candle = bool(rule.parameters.get("entry_on_next_candle", True))
     require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", True))
     require_liquidity_sweep = bool(rule.parameters.get("require_liquidity_sweep", False))
+    require_signal_touches_line = bool(rule.parameters.get("require_signal_touches_line", False))
+    max_entry_distance_points = float(rule.parameters.get("max_entry_distance_from_line_points", 12.0))
+    max_minutes_after_touch = float(rule.parameters.get("max_minutes_after_liquidity_touch", 0.0))
+    allow_longs = bool(rule.parameters.get("allow_longs", False))
+    allow_shorts = bool(rule.parameters.get("allow_shorts", True))
     use_daily_trend_filter = bool(rule.parameters.get("use_daily_trend_filter", False))
     use_session_filter = bool(rule.parameters.get("use_session_filter", True))
     session_start_hour_utc = int(rule.parameters.get("session_start_hour_utc", 8))
@@ -702,6 +769,8 @@ def backtest_liquidity_intraday(
     current_day = ""
     touched_upper = False
     touched_lower = False
+    first_upper_ts = ""
+    first_lower_ts = ""
     pending_red: dict[str, float] | None = None
     pending_green: dict[str, float] | None = None
     trades_in_sequence = 0
@@ -726,6 +795,8 @@ def backtest_liquidity_intraday(
             current_day = day
             touched_upper = False
             touched_lower = False
+            first_upper_ts = ""
+            first_lower_ts = ""
             pending_red = None
             pending_green = None
             trades_in_sequence = 0
@@ -910,8 +981,12 @@ def backtest_liquidity_intraday(
 
         if high >= upper:
             touched_upper = True
+            if not first_upper_ts:
+                first_upper_ts = timestamp
         if low <= lower:
             touched_lower = True
+            if not first_lower_ts:
+                first_lower_ts = timestamp
 
         if not touched_upper and not touched_lower:
             equity_curve.append(wallet_usd / starting_wallet)
@@ -923,13 +998,16 @@ def backtest_liquidity_intraday(
             sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_upper(high, close, upper)
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or candle_range >= min_signal_range_points
-            if body_ok and range_ok and sweep_ok:
-                pending_red = {
-                    "high": high,
-                    "low": low,
-                    "close": close,
-                    "index": index,
-                }
+            touches_line = high >= upper
+            timing_ok = _liquidity_timing_ok(first_upper_ts, timestamp, max_minutes_after_touch)
+            if body_ok and range_ok and sweep_ok and timing_ok:
+                if not require_signal_touches_line or touches_line:
+                    pending_red = {
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "index": index,
+                    }
 
         if touched_lower and close > open_price:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
@@ -937,15 +1015,18 @@ def backtest_liquidity_intraday(
             sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_lower(low, close, lower)
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or candle_range >= min_signal_range_points
-            if body_ok and range_ok and sweep_ok:
-                pending_green = {
-                    "high": high,
-                    "low": low,
-                    "close": close,
-                    "index": index,
-                }
+            touches_line = low <= lower
+            timing_ok = _liquidity_timing_ok(first_lower_ts, timestamp, max_minutes_after_touch)
+            if body_ok and range_ok and sweep_ok and timing_ok:
+                if not require_signal_touches_line or touches_line:
+                    pending_green = {
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "index": index,
+                    }
 
-        can_enter_short = pending_red and (
+        can_enter_short = allow_shorts and pending_red and (
             index > pending_red["index"] if entry_on_next_candle else True
         )
         if can_enter_short and low < pending_red["low"]:
@@ -993,6 +1074,10 @@ def backtest_liquidity_intraday(
                         use_session_filter=use_session_filter,
                         session_start_hour_utc=session_start_hour_utc,
                         session_end_hour_utc=session_end_hour_utc,
+                        require_signal_touches_line=require_signal_touches_line,
+                        max_entry_distance_points=max_entry_distance_points,
+                        max_minutes_after_touch=max_minutes_after_touch,
+                        first_touch_ts=first_upper_ts,
                     )
                     and target_1 > 0
                     and entry_price > target_1
@@ -1011,7 +1096,7 @@ def backtest_liquidity_intraday(
                     upper_entries_today += 1
                     pending_red = None
 
-        can_enter_long = pending_green and (
+        can_enter_long = allow_longs and pending_green and (
             index > pending_green["index"] if entry_on_next_candle else True
         )
         if can_enter_long and high > pending_green["high"]:
@@ -1059,6 +1144,10 @@ def backtest_liquidity_intraday(
                         use_session_filter=use_session_filter,
                         session_start_hour_utc=session_start_hour_utc,
                         session_end_hour_utc=session_end_hour_utc,
+                        require_signal_touches_line=require_signal_touches_line,
+                        max_entry_distance_points=max_entry_distance_points,
+                        max_minutes_after_touch=max_minutes_after_touch,
+                        first_touch_ts=first_lower_ts,
                     )
                     and target_1 > 0
                     and entry_price < target_1
@@ -1122,6 +1211,11 @@ def backtest_liquidity_intraday(
         "skips_middle_zone_without_touch": True,
         "instrument_eth_futures": True,
         "requires_liquidity_sweep_rejection": require_liquidity_sweep,
+        "requires_signal_candle_at_line": require_signal_touches_line,
+        "filters_entry_distance_from_line": max_entry_distance_points > 0,
+        "filters_minutes_after_liquidity_touch": max_minutes_after_touch > 0,
+        "allows_longs": allow_longs,
+        "allows_shorts": allow_shorts,
         "uses_daily_trend_filter": use_daily_trend_filter,
         "uses_utc_session_filter": use_session_filter,
         "simulates_trading_fees": fee_pct_per_side > 0,

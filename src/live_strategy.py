@@ -14,6 +14,7 @@ from src.backtest import (
     _liquidity_sweep_at_lower,
     _liquidity_sweep_at_upper,
     _liquidity_targets,
+    _liquidity_timing_ok,
     _passes_liquidity_entry_filters,
     _signal_body_ratio,
 )
@@ -68,6 +69,8 @@ class LiveSessionState:
     day: str = ""
     touched_upper: bool = False
     touched_lower: bool = False
+    first_upper_ts: str = ""
+    first_lower_ts: str = ""
     pending_red: dict[str, float] | None = None
     pending_green: dict[str, float] | None = None
     trades_in_sequence: int = 0
@@ -177,6 +180,8 @@ class LiveLiquidityRunner:
         session.day = day
         session.touched_upper = False
         session.touched_lower = False
+        session.first_upper_ts = ""
+        session.first_lower_ts = ""
         session.pending_red = None
         session.pending_green = None
         session.trades_in_sequence = 0
@@ -651,18 +656,23 @@ class LiveLiquidityRunner:
         max_trades = int(params.get("max_trades_per_sequence", 3))
         max_full_sl = int(params.get("max_full_stop_losses_per_session", 2))
         max_entries_per_line = int(params.get("max_entries_per_liquidity_line_per_day", 1))
-        partial_target_points = float(params.get("partial_target_points", 5))
-        use_swing_target_for_partial = bool(params.get("use_swing_target_for_partial", True))
-        min_sl_points = float(params.get("min_stop_loss_points", 0.0))
-        max_sl_points = float(params.get("max_stop_loss_points", 50.0))
-        min_reward_to_risk = float(params.get("min_reward_to_risk", 1.0))
-        min_signal_body_ratio = float(params.get("min_signal_body_ratio", 0.35))
-        min_signal_range_points = float(params.get("min_signal_range_points", 0.0))
+        partial_target_points = float(params.get("partial_target_points", 15))
+        use_swing_target_for_partial = bool(params.get("use_swing_target_for_partial", False))
+        min_sl_points = float(params.get("min_stop_loss_points", 4.0))
+        max_sl_points = float(params.get("max_stop_loss_points", 7.0))
+        min_reward_to_risk = float(params.get("min_reward_to_risk", 2.5))
+        min_signal_body_ratio = float(params.get("min_signal_body_ratio", 0.75))
+        min_signal_range_points = float(params.get("min_signal_range_points", 3.5))
         entry_on_next_candle = bool(params.get("entry_on_next_candle", True))
-        require_close_beyond_signal = bool(params.get("require_close_beyond_signal", False))
-        require_liquidity_sweep = bool(params.get("require_liquidity_sweep", True))
+        require_close_beyond_signal = bool(params.get("require_close_beyond_signal", True))
+        require_liquidity_sweep = bool(params.get("require_liquidity_sweep", False))
+        require_signal_touches_line = bool(params.get("require_signal_touches_line", False))
+        max_entry_distance_points = float(params.get("max_entry_distance_from_line_points", 12.0))
+        max_minutes_after_touch = float(params.get("max_minutes_after_liquidity_touch", 0.0))
+        allow_longs = bool(params.get("allow_longs", False))
+        allow_shorts = bool(params.get("allow_shorts", True))
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
-        use_session_filter = bool(params.get("use_session_filter", False))
+        use_session_filter = bool(params.get("use_session_filter", True))
         session_start_hour_utc = int(params.get("session_start_hour_utc", 8))
         session_end_hour_utc = int(params.get("session_end_hour_utc", 20))
         swing_lookback = int(params.get("swing_lookback_days", 20))
@@ -681,8 +691,12 @@ class LiveLiquidityRunner:
 
         if high >= upper:
             session.touched_upper = True
+            if not session.first_upper_ts:
+                session.first_upper_ts = timestamp
         if low <= lower:
             session.touched_lower = True
+            if not session.first_lower_ts:
+                session.first_lower_ts = timestamp
 
         if not session.touched_upper and not session.touched_lower:
             return []
@@ -692,31 +706,45 @@ class LiveLiquidityRunner:
             sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_upper(high, close, upper)
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or (high - low) >= min_signal_range_points
-            if body_ok and range_ok and sweep_ok:
-                session.pending_red = {
-                    "high": high,
-                    "low": low,
-                    "close": close,
-                    "index_ts": timestamp,
-                }
+            touches_line = high >= upper
+            timing_ok = _liquidity_timing_ok(
+                session.first_upper_ts, timestamp, max_minutes_after_touch
+            )
+            if body_ok and range_ok and sweep_ok and timing_ok:
+                if not require_signal_touches_line or touches_line:
+                    session.pending_red = {
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "index_ts": timestamp,
+                    }
 
-        if session.touched_lower and close > open_price:
+        if allow_longs and session.touched_lower and close > open_price:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
             sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_lower(low, close, lower)
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or (high - low) >= min_signal_range_points
-            if body_ok and range_ok and sweep_ok:
-                session.pending_green = {
-                    "high": high,
-                    "low": low,
-                    "close": close,
-                    "index_ts": timestamp,
-                }
+            touches_line = low <= lower
+            timing_ok = _liquidity_timing_ok(
+                session.first_lower_ts, timestamp, max_minutes_after_touch
+            )
+            if body_ok and range_ok and sweep_ok and timing_ok:
+                if not require_signal_touches_line or touches_line:
+                    session.pending_green = {
+                        "high": high,
+                        "low": low,
+                        "close": close,
+                        "index_ts": timestamp,
+                    }
 
         actions: list[str] = []
 
         pending_red = session.pending_red
-        if pending_red and (timestamp > pending_red["index_ts"] if entry_on_next_candle else True):
+        if (
+            allow_shorts
+            and pending_red
+            and (timestamp > pending_red["index_ts"] if entry_on_next_candle else True)
+        ):
             if low < pending_red["low"]:
                 short_break_ok = close < pending_red["low"] if require_close_beyond_signal else True
                 if short_break_ok:
@@ -759,6 +787,10 @@ class LiveLiquidityRunner:
                                 use_session_filter=use_session_filter,
                                 session_start_hour_utc=session_start_hour_utc,
                                 session_end_hour_utc=session_end_hour_utc,
+                                require_signal_touches_line=require_signal_touches_line,
+                                max_entry_distance_points=max_entry_distance_points,
+                                max_minutes_after_touch=max_minutes_after_touch,
+                                first_touch_ts=session.first_upper_ts,
                             )
                             and target_1 > 0
                             and entry_price > target_1
@@ -779,7 +811,11 @@ class LiveLiquidityRunner:
                             )
 
         pending_green = session.pending_green
-        if pending_green and (timestamp > pending_green["index_ts"] if entry_on_next_candle else True):
+        if (
+            allow_longs
+            and pending_green
+            and (timestamp > pending_green["index_ts"] if entry_on_next_candle else True)
+        ):
             if high > pending_green["high"]:
                 long_break_ok = close > pending_green["high"] if require_close_beyond_signal else True
                 if long_break_ok:
@@ -822,6 +858,10 @@ class LiveLiquidityRunner:
                                 use_session_filter=use_session_filter,
                                 session_start_hour_utc=session_start_hour_utc,
                                 session_end_hour_utc=session_end_hour_utc,
+                                require_signal_touches_line=require_signal_touches_line,
+                                max_entry_distance_points=max_entry_distance_points,
+                                max_minutes_after_touch=max_minutes_after_touch,
+                                first_touch_ts=session.first_lower_ts,
                             )
                             and target_1 > 0
                             and entry_price < target_1

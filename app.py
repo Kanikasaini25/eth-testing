@@ -20,7 +20,6 @@ from src.delta_data import CANDLES_PER_DAY_1M, expected_1m_candles
 from src.delta_trading import DeltaTradingClient, is_testnet_url
 from src.email_notify import is_email_configured, is_email_enabled, send_test_email
 from src.live_strategy import LiveLiquidityRunner, default_rules_path
-from src.pipeline import run_pipeline
 
 st.set_page_config(
     page_title="YouTube Strategy Backtester",
@@ -387,8 +386,9 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     st.subheader("LQDTY Live Strategy → Demo Account")
     env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
     st.caption(
-        f"Runs the same liquidity strategy as backtest on **{env_label}**. "
-        f"100 lots entry · 80 partial @ +15 pts · 20 runner with 3 pt trail."
+        f"Runs the same liquidity rules as backtest on **{env_label}**. "
+        "Shorts only · body ≥ 75% · entry within 12 pts of previous-day high · "
+        "min R:R 2.5 · 100 lots · 80 partial @ +15 pts · 20 runner with 3 pt trail."
     )
 
     rules_path = default_rules_path()
@@ -407,6 +407,27 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     )
     if enabled != state.enabled:
         runner.set_enabled(enabled)
+
+    params = runner.rule.parameters
+    st.markdown("**Active live rules**")
+    st.json(
+        {
+            "allow_longs": params.get("allow_longs", False),
+            "allow_shorts": params.get("allow_shorts", True),
+            "min_signal_body_ratio": params.get("min_signal_body_ratio"),
+            "max_entry_distance_from_line_points": params.get(
+                "max_entry_distance_from_line_points"
+            ),
+            "min_reward_to_risk": params.get("min_reward_to_risk"),
+            "min_stop_loss_points": params.get("min_stop_loss_points"),
+            "max_stop_loss_points": params.get("max_stop_loss_points"),
+            "partial_target_points": params.get("partial_target_points"),
+            "session_hours_utc": (
+                f"{params.get('session_start_hour_utc')}:00–"
+                f"{params.get('session_end_hour_utc')}:00"
+            ),
+        }
+    )
 
     tick_col1, tick_col2, tick_col3 = st.columns(3)
     with tick_col1:
@@ -496,7 +517,9 @@ def main() -> None:
 
     settings = render_sidebar()
 
-    demo_tab, live_tab, backtest_tab = st.tabs(["Demo Account", "Live Strategy", "Backtest"])
+    demo_tab, live_tab, backtest_tab = st.tabs(
+        ["Demo Account", "Live Strategy", "Backtest"]
+    )
 
     with demo_tab:
         render_demo_account(settings["symbol"], settings["base_url"])

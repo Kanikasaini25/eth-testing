@@ -25,7 +25,7 @@ Edit `.env` with your YouTube URL:
 YOUTUBE_URLS=https://www.youtube.com/watch?v=your-video-id
 DELTA_SYMBOL=ETHUSD
 DELTA_RESOLUTION=1d
-BACKTEST_DAYS=730
+BACKTEST_DAYS=30
 ```
 
 ## Run with Streamlit UI

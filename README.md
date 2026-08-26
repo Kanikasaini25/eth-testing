@@ -6,7 +6,7 @@ Backtest trading strategy rules on **Delta Exchange ETH futures**.
 
 1. Loads trading rules from `data/strategies/*.json`
 2. Downloads ETHUSD candles from Delta Exchange
-3. Backtests **LQDTY (1d/1m)** and **15m POC** in separate Streamlit tabs
+3. Backtests **LQDTY (1d/1m transcript rules)** and **15m POC** in separate Streamlit tabs
 
 ## Setup
 
@@ -31,7 +31,7 @@ streamlit run app.py
 Tabs:
 
 - **Demo Account** — wallet, position, test orders
-- **Backtest 1d / 1m** — LQDTY previous-day high/low + 1m entries
+- **Backtest 1d / 1m** — LQDTY previous-day high/low, 1m confirmation, swing targets
 - **Backtest 15m** — previous-day POC reaction
 
 Each backtest tab has its own Run button, rules file, and saved results. Running one does not overwrite the other.
@@ -67,7 +67,7 @@ python main.py --rules data/strategies/wI9b968AvW8_rules.json --symbol ETHUSD --
 
 | File | Strategy |
 |------|----------|
-| `data/strategies/lqdty_liquidity.json` | LQDTY liquidity (1d levels + 1m entries) |
+| `data/strategies/lqdty_liquidity.json` | LQDTY liquidity from the 1d/1m transcript (PDH/PDL + 1m confirmation) |
 | `data/strategies/wI9b968AvW8_rules.json` | 15m previous-day POC reaction |
 
 ## Delta Exchange

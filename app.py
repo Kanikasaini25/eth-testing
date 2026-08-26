@@ -92,10 +92,14 @@ def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, 
     final_wallet = result.trades[-1].wallet_balance if result.trades else starting_wallet
     net_usd = round(final_wallet - starting_wallet, 2)
     wins = losses = 0
+    groups: dict[tuple[str, float], list] = {}
     for trade in result.trades:
-        if trade.pnl_usd > 0:
+        groups.setdefault((trade.entry_date, trade.entry_price), []).append(trade)
+    for legs in groups.values():
+        pnl = sum(leg.pnl_usd for leg in legs)
+        if pnl > 0:
             wins += 1
-        elif trade.pnl_usd < 0:
+        elif pnl < 0:
             losses += 1
     return {
         "total_lot_points": round(total_lot_points, 2),
@@ -362,10 +366,11 @@ def main() -> None:
 
 
 def _render_lqdty_backtest_page(settings: dict) -> None:
-    st.subheader("LQDTY Backtest (1d lines + 1m entries)")
+    st.subheader("LQDTY Backtest (transcript: 1d lines + 1m confirmation)")
     rules_path = default_rules_path()
     st.caption(
-        f"Previous-day high/low on 1d, entries on 1m. Rules: `{rules_path.name}`. "
+        f"Transcript LQDTY: previous-day high/low on 1d, fresh 1m red/green confirmation, "
+        f"swing targets. Rules: `{rules_path.name}`. "
         "Candles: **India live** (`api.india.delta.exchange`) — real ETHUSD history, not testnet."
     )
     if not rules_path.exists():
@@ -523,12 +528,12 @@ def _render_lqdty_backtest_page(settings: dict) -> None:
                         "Final wallet",
                         _format_usd(totals["final_wallet"]),
                     )
-                    pnl_col3.metric("Winning exits", totals["wins"])
-                    pnl_col4.metric("Losing exits", totals["losses"])
+                    pnl_col3.metric("Winning setups", totals["wins"])
+                    pnl_col4.metric("Losing setups", totals["losses"])
                     st.caption(
                         f"Starting wallet: **{_format_usd(starting_wallet)}** → "
                         f"Final: **{_format_usd(totals['final_wallet'])}** · "
-                        f"**P/L ($)** = net USD per exit (price move × ETH size − entry/exit fees)"
+                        f"Win/loss counts one result per entry (partial + runner = one setup)."
                     )
                 else:
                     st.write("No trades generated.")

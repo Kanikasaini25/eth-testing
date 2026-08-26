@@ -238,6 +238,24 @@ def _record_trade(
     )
 
 
+def normalize_lot_split(
+    position_lots: int,
+    partial_exit_lots: int,
+    runner_lots: int,
+) -> tuple[int, int]:
+    """Return (partial_lots, runner_lots) that sum to position_lots."""
+    position_lots = max(0, int(position_lots))
+    if position_lots <= 0:
+        return 0, 0
+    if int(runner_lots) <= 0:
+        return position_lots, 0
+    partial = min(max(0, int(partial_exit_lots)), position_lots)
+    runner = position_lots - partial
+    if runner <= 0:
+        return position_lots, 0
+    return partial, runner
+
+
 def _close_trade(
     trades: list[Trade],
     wallet_usd: float,
@@ -253,12 +271,13 @@ def _close_trade(
     open_lots: int,
     fee_pct_per_side: float = 0.0,
 ) -> tuple[float, float, int]:
+    lots = min(max(0, int(lots)), max(0, int(open_lots)))
+    if lots <= 0:
+        return wallet_usd, entry_fee_remaining, max(0, int(open_lots))
     points = _points_captured(side, entry_price, exit_price)
     gross = _gross_pnl_usd(points, lots)
     exit_fee = _trading_fee_usd(exit_price, lots, fee_pct_per_side)
-    entry_fee_share = (
-        entry_fee_remaining * (lots / open_lots) if open_lots else entry_fee_remaining
-    )
+    entry_fee_share = entry_fee_remaining * (lots / open_lots)
     net_pnl = gross - exit_fee - entry_fee_share
     wallet_usd += net_pnl
     _record_trade(
@@ -275,6 +294,28 @@ def _close_trade(
         position_lots,
     )
     return wallet_usd, entry_fee_remaining - entry_fee_share, open_lots - lots
+
+
+def _arm_runner(
+    *,
+    runner_lots: int,
+    open_lots: int,
+    side: str,
+    entry_price: float,
+    fill_price: float,
+    use_trailing: bool,
+    trailing_points: float,
+) -> tuple[bool, bool, bool, float, float]:
+    """After a partial fill: keep a real runner or flatten. Never hold 0 lots."""
+    if runner_lots <= 0 or open_lots <= 0:
+        return False, False, False, entry_price, 0.0
+    if use_trailing:
+        if side == "long":
+            stop_loss = max(entry_price, fill_price - trailing_points)
+        else:
+            stop_loss = min(entry_price, fill_price + trailing_points)
+        return True, True, True, stop_loss, fill_price
+    return True, True, True, entry_price, fill_price
 
 
 def _points_target(entry: float, side: str, points: float) -> float:
@@ -492,6 +533,103 @@ def _passes_liquidity_entry_filters(
     )
 
 
+def _pending_ready_for_entry(
+    current_index: int,
+    pending: dict | None,
+    entry_on_next_candle: bool,
+) -> bool:
+    if not pending:
+        return False
+    if entry_on_next_candle:
+        return current_index == int(pending["index"]) + 1
+    return current_index >= int(pending["index"])
+
+
+def _pending_is_expired(
+    current_index: int,
+    pending: dict | None,
+    require_immediate: bool,
+    entry_on_next_candle: bool,
+) -> bool:
+    if not pending or not require_immediate:
+        return False
+    last_valid = int(pending["index"]) + (1 if entry_on_next_candle else 0)
+    return current_index > last_valid
+
+
+def _live_pending_due(pending: dict | None, timestamp: str, entry_on_next_candle: bool) -> bool:
+    if not pending:
+        return False
+    pending_ts = str(pending.get("index_ts") or pending.get("timestamp") or "")
+    if not pending_ts:
+        return False
+    if entry_on_next_candle:
+        return timestamp > pending_ts
+    return timestamp >= pending_ts
+
+
+def _liquidity_stop_loss(
+    side: str,
+    signal: dict,
+    prev_row: dict | None,
+    stop_loss_mode: str,
+) -> float:
+    if stop_loss_mode == "signal_candle_wick":
+        return float(signal["high"] if side == "short" else signal["low"])
+    if prev_row:
+        return float(prev_row["high"] if side == "short" else prev_row["low"])
+    return float(signal["high"] if side == "short" else signal["low"])
+
+
+def _liquidity_fill_price(
+    side: str,
+    signal: dict,
+    close: float,
+    require_close_beyond_signal: bool,
+) -> float:
+    if require_close_beyond_signal:
+        return close
+    return float(signal["low"] if side == "short" else signal["high"])
+
+
+def _qualify_liquidity_signal(
+    *,
+    is_bearish: bool,
+    open_price: float,
+    high: float,
+    low: float,
+    close: float,
+    line: float,
+    min_signal_body_ratio: float,
+    min_signal_range_points: float,
+    require_liquidity_sweep: bool,
+    require_signal_touches_line: bool,
+    first_touch_ts: str,
+    timestamp: str,
+    max_minutes_after_touch: float,
+) -> bool:
+    color_ok = close < open_price if is_bearish else close > open_price
+    if not color_ok:
+        return False
+    body_ratio = _signal_body_ratio(open_price, high, low, close)
+    if min_signal_body_ratio > 0 and body_ratio < min_signal_body_ratio:
+        return False
+    if min_signal_range_points > 0 and (high - low) < min_signal_range_points:
+        return False
+    if require_liquidity_sweep:
+        sweep_ok = (
+            _liquidity_sweep_at_upper(high, close, line)
+            if is_bearish
+            else _liquidity_sweep_at_lower(low, close, line)
+        )
+        if not sweep_ok:
+            return False
+    touches_line = high >= line if is_bearish else low <= line
+    if require_signal_touches_line and not touches_line:
+        return False
+    return _liquidity_timing_ok(first_touch_ts, timestamp, max_minutes_after_touch)
+
+
 def _passes_liquidity_proximity_filters(
     *,
     side: str,
@@ -544,48 +682,55 @@ def backtest_liquidity_intraday(
     daily_rows: list[dict],
     rule: TradingRule,
 ) -> BacktestResult:
-    """LQDTY on ETH futures: 100 lots entry, partial at +10 points, runner to swing."""
+    """LQDTY on ETH futures: previous-day high/low, 1m confirmation, swing targets."""
     levels = _daily_liquidity_levels(daily_rows)
     swing_lookback = int(rule.parameters.get("swing_lookback_days", 20))
     max_trades = int(rule.parameters.get("max_trades_per_sequence", 3))
     max_full_sl = int(rule.parameters.get("max_full_stop_losses_per_session", 2))
     max_sl_pct = float(rule.parameters.get("max_stop_loss_pct", 5.0))
     position_lots = int(rule.parameters.get("position_lots", FIXED_ENTRY_LOTS))
-    partial_exit_lots = int(
-        rule.parameters.get("partial_exit_lots", position_lots * PARTIAL_EXIT_LOTS // FIXED_ENTRY_LOTS)
+    raw_partial = int(
+        rule.parameters.get(
+            "partial_exit_lots",
+            position_lots * PARTIAL_EXIT_LOTS // FIXED_ENTRY_LOTS,
+        )
     )
-    runner_lots = int(
-        rule.parameters.get("runner_lots", position_lots - partial_exit_lots)
+    raw_runner = int(rule.parameters.get("runner_lots", position_lots - raw_partial))
+    partial_exit_lots, runner_lots = normalize_lot_split(
+        position_lots, raw_partial, raw_runner
     )
-    partial_target_points = float(rule.parameters.get("partial_target_points", 10))
-    use_swing_target_for_partial = bool(rule.parameters.get("use_swing_target_for_partial", False))
+    partial_target_points = float(rule.parameters.get("partial_target_points", 0))
+    use_swing_target_for_partial = bool(rule.parameters.get("use_swing_target_for_partial", True))
     runner_swing_lookback = int(rule.parameters.get("runner_swing_lookback_days", 60))
-    max_entries_per_line = int(rule.parameters.get("max_entries_per_liquidity_line_per_day", 1))
-    min_sl_points = float(rule.parameters.get("min_stop_loss_points", 4.0))
-    max_sl_points = float(rule.parameters.get("max_stop_loss_points", 7.0))
-    min_reward_to_risk = float(rule.parameters.get("min_reward_to_risk", 2.5))
-    min_signal_body_ratio = float(rule.parameters.get("min_signal_body_ratio", 0.75))
-    min_signal_range_points = float(rule.parameters.get("min_signal_range_points", 3.5))
+    max_entries_per_line = int(rule.parameters.get("max_entries_per_liquidity_line_per_day", 3))
+    min_sl_points = float(rule.parameters.get("min_stop_loss_points", 0.0))
+    max_sl_points = float(rule.parameters.get("max_stop_loss_points", 20.0))
+    min_reward_to_risk = float(rule.parameters.get("min_reward_to_risk", 0.0))
+    min_signal_body_ratio = float(rule.parameters.get("min_signal_body_ratio", 0.0))
+    min_signal_range_points = float(rule.parameters.get("min_signal_range_points", 0.0))
     entry_on_next_candle = bool(rule.parameters.get("entry_on_next_candle", True))
-    require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", True))
+    require_immediate_next = bool(rule.parameters.get("require_immediate_next_candle_break", True))
+    require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", False))
     require_liquidity_sweep = bool(rule.parameters.get("require_liquidity_sweep", False))
     require_signal_touches_line = bool(rule.parameters.get("require_signal_touches_line", False))
-    max_entry_distance_points = float(rule.parameters.get("max_entry_distance_from_line_points", 8.0))
+    max_entry_distance_points = float(rule.parameters.get("max_entry_distance_from_line_points", 0.0))
     max_minutes_after_touch = float(rule.parameters.get("max_minutes_after_liquidity_touch", 0.0))
     allow_longs = bool(rule.parameters.get("allow_longs", True))
     allow_shorts = bool(rule.parameters.get("allow_shorts", True))
     use_daily_trend_filter = bool(rule.parameters.get("use_daily_trend_filter", False))
-    use_session_filter = bool(rule.parameters.get("use_session_filter", True))
-    session_start_hour_utc = int(rule.parameters.get("session_start_hour_utc", 8))
-    session_end_hour_utc = int(rule.parameters.get("session_end_hour_utc", 20))
+    use_session_filter = bool(rule.parameters.get("use_session_filter", False))
+    session_start_hour_utc = int(rule.parameters.get("session_start_hour_utc", 0))
+    session_end_hour_utc = int(rule.parameters.get("session_end_hour_utc", 0))
     fee_pct_per_side = float(rule.parameters.get("fee_pct_per_side", 0.05))
+    block_line_after_sl = bool(rule.parameters.get("block_line_after_full_stop_loss", False))
+    stop_loss_mode = str(rule.parameters.get("stop_loss_mode", "signal_candle_wick"))
     partial_exit_reason = (
         "partial_swing_target"
         if use_swing_target_for_partial
         else f"partial_target_{int(partial_target_points)}pts"
     )
-    trailing_stop_points = float(rule.parameters.get("trailing_stop_points", 3.0))
-    use_trailing_after_partial = bool(rule.parameters.get("use_trailing_stop_after_partial", True))
+    trailing_stop_points = float(rule.parameters.get("trailing_stop_points", 0.0))
+    use_trailing_after_partial = bool(rule.parameters.get("use_trailing_stop_after_partial", False))
     starting_wallet = float(rule.parameters.get("starting_wallet_usd", 10_000))
 
     trades: list[Trade] = []
@@ -631,6 +776,31 @@ def backtest_liquidity_intraday(
         low = _effective_low(row, bar_ref)
 
         if day != current_day:
+            if (
+                in_position
+                and partial_taken
+                and runner_open
+                and open_lots > 0
+                and prev_row is not None
+            ):
+                wallet_usd, entry_fee_remaining, open_lots = _close_trade(
+                    trades,
+                    wallet_usd,
+                    entry_ts,
+                    prev_row["timestamp"],
+                    entry_price,
+                    float(prev_row["close"]),
+                    "runner_session_end",
+                    side,
+                    open_lots,
+                    position_lots,
+                    entry_fee_remaining,
+                    open_lots,
+                    fee_pct_per_side=fee_pct_per_side,
+                )
+                in_position = False
+                runner_open = False
+                partial_taken = False
             current_day = day
             touched_upper = False
             touched_lower = False
@@ -666,23 +836,24 @@ def backtest_liquidity_intraday(
                         timestamp,
                         entry_price,
                         target_1,
-                        partial_exit_reason,
+                        "target_1" if runner_lots <= 0 else partial_exit_reason,
                         "long",
-                        partial_exit_lots,
+                        partial_exit_lots if runner_lots > 0 else open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
                         fee_pct_per_side=fee_pct_per_side,
                     )
-                    partial_taken = True
-                    runner_open = True
-                    best_price = max(target_1, high)
-                    stop_loss = (
-                        max(entry_price, best_price - trailing_stop_points)
-                        if use_trailing_after_partial
-                        else entry_price
+                    in_position, partial_taken, runner_open, stop_loss, best_price = _arm_runner(
+                        runner_lots=runner_lots,
+                        open_lots=open_lots,
+                        side="long",
+                        entry_price=entry_price,
+                        fill_price=max(target_1, high),
+                        use_trailing=use_trailing_after_partial,
+                        trailing_points=trailing_stop_points,
                     )
-                elif partial_taken and runner_open and high >= target_2:
+                elif partial_taken and runner_open and open_lots > 0 and high >= target_2:
                     wallet_usd, entry_fee_remaining, open_lots = _close_trade(
                         trades,
                         wallet_usd,
@@ -692,7 +863,7 @@ def backtest_liquidity_intraday(
                         target_2,
                         "runner_swing_target",
                         "long",
-                        runner_lots,
+                        open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
@@ -700,14 +871,15 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                elif low <= stop_loss:
+                    partial_taken = False
+                elif low <= stop_loss and open_lots > 0:
                     if partial_taken and use_trailing_after_partial and stop_loss > entry_price:
                         reason = "trailing_stop"
                     elif partial_taken and stop_loss == entry_price:
                         reason = "breakeven_stop"
                     else:
                         reason = "stop_loss"
-                    exit_lots = runner_lots if partial_taken else position_lots
+                    was_full_stop = not partial_taken
                     wallet_usd, entry_fee_remaining, open_lots = _close_trade(
                         trades,
                         wallet_usd,
@@ -717,7 +889,7 @@ def backtest_liquidity_intraday(
                         stop_loss,
                         reason,
                         "long",
-                        exit_lots,
+                        open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
@@ -725,12 +897,14 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                    if not partial_taken:
+                    partial_taken = False
+                    if was_full_stop:
                         full_sl_count += 1
-                        if entry_line == "upper":
-                            upper_line_blocked = True
-                        elif entry_line == "lower":
-                            lower_line_blocked = True
+                        if block_line_after_sl:
+                            if entry_line == "upper":
+                                upper_line_blocked = True
+                            elif entry_line == "lower":
+                                lower_line_blocked = True
 
             elif side == "short":
                 if partial_taken and runner_open and use_trailing_after_partial:
@@ -745,23 +919,24 @@ def backtest_liquidity_intraday(
                         timestamp,
                         entry_price,
                         target_1,
-                        partial_exit_reason,
+                        "target_1" if runner_lots <= 0 else partial_exit_reason,
                         "short",
-                        partial_exit_lots,
+                        partial_exit_lots if runner_lots > 0 else open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
                         fee_pct_per_side=fee_pct_per_side,
                     )
-                    partial_taken = True
-                    runner_open = True
-                    best_price = min(target_1, low)
-                    stop_loss = (
-                        min(entry_price, best_price + trailing_stop_points)
-                        if use_trailing_after_partial
-                        else entry_price
+                    in_position, partial_taken, runner_open, stop_loss, best_price = _arm_runner(
+                        runner_lots=runner_lots,
+                        open_lots=open_lots,
+                        side="short",
+                        entry_price=entry_price,
+                        fill_price=min(target_1, low),
+                        use_trailing=use_trailing_after_partial,
+                        trailing_points=trailing_stop_points,
                     )
-                elif partial_taken and runner_open and low <= target_2:
+                elif partial_taken and runner_open and open_lots > 0 and low <= target_2:
                     wallet_usd, entry_fee_remaining, open_lots = _close_trade(
                         trades,
                         wallet_usd,
@@ -771,7 +946,7 @@ def backtest_liquidity_intraday(
                         target_2,
                         "runner_swing_target",
                         "short",
-                        runner_lots,
+                        open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
@@ -779,14 +954,15 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                elif high >= stop_loss:
+                    partial_taken = False
+                elif high >= stop_loss and open_lots > 0:
                     if partial_taken and use_trailing_after_partial and stop_loss < entry_price:
                         reason = "trailing_stop"
                     elif partial_taken and stop_loss == entry_price:
                         reason = "breakeven_stop"
                     else:
                         reason = "stop_loss"
-                    exit_lots = runner_lots if partial_taken else position_lots
+                    was_full_stop = not partial_taken
                     wallet_usd, entry_fee_remaining, open_lots = _close_trade(
                         trades,
                         wallet_usd,
@@ -796,7 +972,7 @@ def backtest_liquidity_intraday(
                         stop_loss,
                         reason,
                         "short",
-                        exit_lots,
+                        open_lots,
                         position_lots,
                         entry_fee_remaining,
                         open_lots,
@@ -804,12 +980,14 @@ def backtest_liquidity_intraday(
                     )
                     in_position = False
                     runner_open = False
-                    if not partial_taken:
+                    partial_taken = False
+                    if was_full_stop:
                         full_sl_count += 1
-                        if entry_line == "upper":
-                            upper_line_blocked = True
-                        elif entry_line == "lower":
-                            lower_line_blocked = True
+                        if block_line_after_sl:
+                            if entry_line == "upper":
+                                upper_line_blocked = True
+                            elif entry_line == "lower":
+                                lower_line_blocked = True
 
             equity_curve.append(wallet_usd / starting_wallet)
             continue
@@ -831,196 +1009,221 @@ def backtest_liquidity_intraday(
             equity_curve.append(wallet_usd / starting_wallet)
             continue
 
-        if touched_upper and close < open_price:
-            body_ratio = _signal_body_ratio(open_price, high, low, close)
-            candle_range = high - low
-            sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_upper(high, close, upper)
-            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
-            range_ok = min_signal_range_points <= 0 or candle_range >= min_signal_range_points
-            touches_line = high >= upper
-            timing_ok = _liquidity_timing_ok(first_upper_ts, timestamp, max_minutes_after_touch)
-            if body_ok and range_ok and sweep_ok and timing_ok:
-                if not require_signal_touches_line or touches_line:
-                    pending_red = {
-                        "high": high,
-                        "low": low,
-                        "close": close,
-                        "index": index,
-                    }
+        if _pending_is_expired(index, pending_red, require_immediate_next, entry_on_next_candle):
+            pending_red = None
+        if _pending_is_expired(index, pending_green, require_immediate_next, entry_on_next_candle):
+            pending_green = None
 
-        if touched_lower and close > open_price:
-            body_ratio = _signal_body_ratio(open_price, high, low, close)
-            candle_range = high - low
-            sweep_ok = not require_liquidity_sweep or _liquidity_sweep_at_lower(low, close, lower)
-            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
-            range_ok = min_signal_range_points <= 0 or candle_range >= min_signal_range_points
-            touches_line = low <= lower
-            timing_ok = _liquidity_timing_ok(first_lower_ts, timestamp, max_minutes_after_touch)
-            if body_ok and range_ok and sweep_ok and timing_ok:
-                if not require_signal_touches_line or touches_line:
-                    pending_green = {
-                        "high": high,
-                        "low": low,
-                        "close": close,
-                        "index": index,
-                    }
-
-        can_enter_short = allow_shorts and pending_red and (
-            index > pending_red["index"] if entry_on_next_candle else True
+        can_enter_short = allow_shorts and _pending_ready_for_entry(
+            index, pending_red, entry_on_next_candle
         )
-        if can_enter_short and low < pending_red["low"]:
-            short_break_ok = (
-                close < pending_red["low"] if require_close_beyond_signal else True
-            )
-            if short_break_ok:
-                if upper_line_blocked or upper_entries_today >= max_entries_per_line:
-                    pending_red = None
-                    equity_curve.append(wallet_usd / starting_wallet)
-                    continue
-                entry_price = close if require_close_beyond_signal else pending_red["low"]
-                stop_loss = float(prev_row["high"]) if prev_row else pending_red["high"]
-                target_1, target_2, reward_points = _liquidity_targets(
-                    "short",
-                    entry_price,
-                    daily_rows,
-                    day,
-                    use_swing_target_for_partial=use_swing_target_for_partial,
-                    partial_target_points=partial_target_points,
-                    swing_lookback=swing_lookback,
-                    runner_swing_lookback=runner_swing_lookback,
+        if can_enter_short and pending_red is not None:
+            if low < pending_red["low"]:
+                short_break_ok = (
+                    close < pending_red["low"] if require_close_beyond_signal else True
                 )
-                signal = pending_red
-                if (
-                    _passes_liquidity_entry_filters(
-                        side="short",
-                        timestamp=timestamp,
-                        entry_price=entry_price,
-                        stop_loss=stop_loss,
-                        reward_points=reward_points,
-                        daily_rows=daily_rows,
-                        day=day,
-                        min_sl_points=min_sl_points,
-                        max_sl_points=max_sl_points,
-                        min_reward_to_risk=min_reward_to_risk,
-                        max_sl_pct=max_sl_pct,
-                        require_liquidity_sweep=require_liquidity_sweep,
-                        signal_high=signal["high"],
-                        signal_low=signal["low"],
-                        signal_close=signal["close"],
-                        upper=upper,
-                        lower=lower,
-                        use_daily_trend_filter=use_daily_trend_filter,
-                        use_session_filter=use_session_filter,
-                        session_start_hour_utc=session_start_hour_utc,
-                        session_end_hour_utc=session_end_hour_utc,
-                        require_signal_touches_line=require_signal_touches_line,
-                        max_entry_distance_points=max_entry_distance_points,
-                        max_minutes_after_touch=max_minutes_after_touch,
-                        first_touch_ts=first_upper_ts,
-                    )
-                    and target_1 > 0
-                    and entry_price > target_1
+                if short_break_ok and not (
+                    upper_line_blocked or upper_entries_today >= max_entries_per_line
                 ):
-                    in_position = True
-                    side = "short"
-                    entry_line = "upper"
-                    entry_ts = timestamp
-                    partial_taken = False
-                    runner_open = False
-                    open_lots = position_lots
-                    entry_fee_remaining = _trading_fee_usd(
-                        entry_price, position_lots, fee_pct_per_side
+                    entry_price = _liquidity_fill_price(
+                        "short", pending_red, close, require_close_beyond_signal
                     )
-                    trades_in_sequence += 1
-                    upper_entries_today += 1
-                    pending_red = None
+                    stop_loss = _liquidity_stop_loss(
+                        "short", pending_red, prev_row, stop_loss_mode
+                    )
+                    target_1, target_2, reward_points = _liquidity_targets(
+                        "short",
+                        entry_price,
+                        daily_rows,
+                        day,
+                        use_swing_target_for_partial=use_swing_target_for_partial,
+                        partial_target_points=partial_target_points,
+                        swing_lookback=swing_lookback,
+                        runner_swing_lookback=runner_swing_lookback,
+                    )
+                    signal = pending_red
+                    if (
+                        _passes_liquidity_entry_filters(
+                            side="short",
+                            timestamp=timestamp,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            reward_points=reward_points,
+                            daily_rows=daily_rows,
+                            day=day,
+                            min_sl_points=min_sl_points,
+                            max_sl_points=max_sl_points,
+                            min_reward_to_risk=min_reward_to_risk,
+                            max_sl_pct=max_sl_pct,
+                            require_liquidity_sweep=require_liquidity_sweep,
+                            signal_high=signal["high"],
+                            signal_low=signal["low"],
+                            signal_close=signal["close"],
+                            upper=upper,
+                            lower=lower,
+                            use_daily_trend_filter=use_daily_trend_filter,
+                            use_session_filter=use_session_filter,
+                            session_start_hour_utc=session_start_hour_utc,
+                            session_end_hour_utc=session_end_hour_utc,
+                            require_signal_touches_line=require_signal_touches_line,
+                            max_entry_distance_points=max_entry_distance_points,
+                            max_minutes_after_touch=max_minutes_after_touch,
+                            first_touch_ts=first_upper_ts,
+                        )
+                        and target_1 > 0
+                        and entry_price > target_1
+                    ):
+                        in_position = True
+                        side = "short"
+                        entry_line = "upper"
+                        entry_ts = timestamp
+                        partial_taken = False
+                        runner_open = False
+                        open_lots = position_lots
+                        entry_fee_remaining = _trading_fee_usd(
+                            entry_price, position_lots, fee_pct_per_side
+                        )
+                        trades_in_sequence += 1
+                        upper_entries_today += 1
+                        pending_red = None
+            if require_immediate_next and pending_red is not None:
+                pending_red = None
 
-        can_enter_long = allow_longs and pending_green and (
-            index > pending_green["index"] if entry_on_next_candle else True
+        can_enter_long = allow_longs and _pending_ready_for_entry(
+            index, pending_green, entry_on_next_candle
         )
-        if can_enter_long and high > pending_green["high"]:
-            long_break_ok = (
-                close > pending_green["high"] if require_close_beyond_signal else True
-            )
-            if long_break_ok:
-                if lower_line_blocked or lower_entries_today >= max_entries_per_line:
-                    pending_green = None
-                    equity_curve.append(wallet_usd / starting_wallet)
-                    continue
-                entry_price = close if require_close_beyond_signal else pending_green["high"]
-                stop_loss = float(prev_row["low"]) if prev_row else pending_green["low"]
-                target_1, target_2, reward_points = _liquidity_targets(
-                    "long",
-                    entry_price,
-                    daily_rows,
-                    day,
-                    use_swing_target_for_partial=use_swing_target_for_partial,
-                    partial_target_points=partial_target_points,
-                    swing_lookback=swing_lookback,
-                    runner_swing_lookback=runner_swing_lookback,
+        if can_enter_long and pending_green is not None:
+            if high > pending_green["high"]:
+                long_break_ok = (
+                    close > pending_green["high"] if require_close_beyond_signal else True
                 )
-                signal = pending_green
-                if (
-                    _passes_liquidity_entry_filters(
-                        side="long",
-                        timestamp=timestamp,
-                        entry_price=entry_price,
-                        stop_loss=stop_loss,
-                        reward_points=reward_points,
-                        daily_rows=daily_rows,
-                        day=day,
-                        min_sl_points=min_sl_points,
-                        max_sl_points=max_sl_points,
-                        min_reward_to_risk=min_reward_to_risk,
-                        max_sl_pct=max_sl_pct,
-                        require_liquidity_sweep=require_liquidity_sweep,
-                        signal_high=signal["high"],
-                        signal_low=signal["low"],
-                        signal_close=signal["close"],
-                        upper=upper,
-                        lower=lower,
-                        use_daily_trend_filter=use_daily_trend_filter,
-                        use_session_filter=use_session_filter,
-                        session_start_hour_utc=session_start_hour_utc,
-                        session_end_hour_utc=session_end_hour_utc,
-                        require_signal_touches_line=require_signal_touches_line,
-                        max_entry_distance_points=max_entry_distance_points,
-                        max_minutes_after_touch=max_minutes_after_touch,
-                        first_touch_ts=first_lower_ts,
-                    )
-                    and target_1 > 0
-                    and entry_price < target_1
+                if long_break_ok and not (
+                    lower_line_blocked or lower_entries_today >= max_entries_per_line
                 ):
-                    in_position = True
-                    side = "long"
-                    entry_line = "lower"
-                    entry_ts = timestamp
-                    partial_taken = False
-                    runner_open = False
-                    open_lots = position_lots
-                    entry_fee_remaining = _trading_fee_usd(
-                        entry_price, position_lots, fee_pct_per_side
+                    entry_price = _liquidity_fill_price(
+                        "long", pending_green, close, require_close_beyond_signal
                     )
-                    trades_in_sequence += 1
-                    lower_entries_today += 1
-                    pending_green = None
+                    stop_loss = _liquidity_stop_loss(
+                        "long", pending_green, prev_row, stop_loss_mode
+                    )
+                    target_1, target_2, reward_points = _liquidity_targets(
+                        "long",
+                        entry_price,
+                        daily_rows,
+                        day,
+                        use_swing_target_for_partial=use_swing_target_for_partial,
+                        partial_target_points=partial_target_points,
+                        swing_lookback=swing_lookback,
+                        runner_swing_lookback=runner_swing_lookback,
+                    )
+                    signal = pending_green
+                    if (
+                        _passes_liquidity_entry_filters(
+                            side="long",
+                            timestamp=timestamp,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            reward_points=reward_points,
+                            daily_rows=daily_rows,
+                            day=day,
+                            min_sl_points=min_sl_points,
+                            max_sl_points=max_sl_points,
+                            min_reward_to_risk=min_reward_to_risk,
+                            max_sl_pct=max_sl_pct,
+                            require_liquidity_sweep=require_liquidity_sweep,
+                            signal_high=signal["high"],
+                            signal_low=signal["low"],
+                            signal_close=signal["close"],
+                            upper=upper,
+                            lower=lower,
+                            use_daily_trend_filter=use_daily_trend_filter,
+                            use_session_filter=use_session_filter,
+                            session_start_hour_utc=session_start_hour_utc,
+                            session_end_hour_utc=session_end_hour_utc,
+                            require_signal_touches_line=require_signal_touches_line,
+                            max_entry_distance_points=max_entry_distance_points,
+                            max_minutes_after_touch=max_minutes_after_touch,
+                            first_touch_ts=first_lower_ts,
+                        )
+                        and target_1 > 0
+                        and entry_price < target_1
+                    ):
+                        in_position = True
+                        side = "long"
+                        entry_line = "lower"
+                        entry_ts = timestamp
+                        partial_taken = False
+                        runner_open = False
+                        open_lots = position_lots
+                        entry_fee_remaining = _trading_fee_usd(
+                            entry_price, position_lots, fee_pct_per_side
+                        )
+                        trades_in_sequence += 1
+                        lower_entries_today += 1
+                        pending_green = None
+            if require_immediate_next and pending_green is not None:
+                pending_green = None
+
+        if not in_position and allow_shorts and touched_upper:
+            if _qualify_liquidity_signal(
+                is_bearish=True,
+                open_price=open_price,
+                high=high,
+                low=low,
+                close=close,
+                line=upper,
+                min_signal_body_ratio=min_signal_body_ratio,
+                min_signal_range_points=min_signal_range_points,
+                require_liquidity_sweep=require_liquidity_sweep,
+                require_signal_touches_line=require_signal_touches_line,
+                first_touch_ts=first_upper_ts,
+                timestamp=timestamp,
+                max_minutes_after_touch=max_minutes_after_touch,
+            ):
+                pending_red = {
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "index": index,
+                }
+
+        if not in_position and allow_longs and touched_lower:
+            if _qualify_liquidity_signal(
+                is_bearish=False,
+                open_price=open_price,
+                high=high,
+                low=low,
+                close=close,
+                line=lower,
+                min_signal_body_ratio=min_signal_body_ratio,
+                min_signal_range_points=min_signal_range_points,
+                require_liquidity_sweep=require_liquidity_sweep,
+                require_signal_touches_line=require_signal_touches_line,
+                first_touch_ts=first_lower_ts,
+                timestamp=timestamp,
+                max_minutes_after_touch=max_minutes_after_touch,
+            ):
+                pending_green = {
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "index": index,
+                }
 
         equity_curve.append(wallet_usd / starting_wallet)
 
-    if in_position:
+    if in_position and open_lots > 0:
         last = intraday_rows[-1]
-        exit_price = float(last["close"])
-        exit_lots = runner_lots if partial_taken else position_lots
         wallet_usd, entry_fee_remaining, open_lots = _close_trade(
             trades,
             wallet_usd,
             entry_ts,
             last["timestamp"],
             entry_price,
-            exit_price,
+            float(last["close"]),
             "open_at_end",
             side,
-            exit_lots,
+            open_lots,
             position_lots,
             entry_fee_remaining,
             open_lots,
@@ -1031,28 +1234,23 @@ def backtest_liquidity_intraday(
         "uses_previous_day_high_low_lines": True,
         "uses_1m_candle_confirmation": True,
         "supports_long_and_short": True,
-        "uses_previous_candle_wick_stop_loss": True,
+        "uses_signal_candle_stop_loss": stop_loss_mode == "signal_candle_wick",
         "entry_on_next_candle": entry_on_next_candle,
+        "requires_immediate_next_candle_break": require_immediate_next,
         "requires_close_beyond_signal": require_close_beyond_signal,
-        "filters_min_stop_loss_points": min_sl_points >= 3.0,
-        "filters_max_stop_loss_points": max_sl_points <= 7.0,
+        "skips_wide_stop_loss": max_sl_points > 0,
         "fixed_100_lot_entry": position_lots == 100,
         "uses_swing_target_for_partial": use_swing_target_for_partial,
-        "uses_fixed_point_partial_target": not use_swing_target_for_partial,
-        "keeps_runner_after_partial": True,
+        "keeps_runner_after_partial": runner_lots > 0,
         "uses_trailing_stop_on_runner": use_trailing_after_partial,
-        "moves_stop_to_breakeven_after_partial": not use_trailing_after_partial,
+        "moves_stop_to_breakeven_after_partial": runner_lots > 0 and not use_trailing_after_partial,
         "uses_swing_target_for_runner": True,
         "limits_max_trades_per_session": True,
         "limits_max_full_stop_losses": True,
-        "one_attempt_per_liquidity_line_per_day": max_entries_per_line == 1,
-        "blocks_line_after_full_stop_loss": True,
+        "retries_same_liquidity_line": not block_line_after_sl,
         "skips_middle_zone_without_touch": True,
         "instrument_eth_futures": True,
         "requires_liquidity_sweep_rejection": require_liquidity_sweep,
-        "requires_signal_candle_at_line": require_signal_touches_line,
-        "filters_entry_distance_from_line": max_entry_distance_points > 0,
-        "filters_minutes_after_liquidity_touch": max_minutes_after_touch > 0,
         "allows_longs": allow_longs,
         "allows_shorts": allow_shorts,
         "uses_daily_trend_filter": use_daily_trend_filter,
@@ -1062,7 +1260,7 @@ def backtest_liquidity_intraday(
 
     result = _build_result(rule, trades, equity_curve, daily_rows, entry_based_win_rate=True)
     result.backtest_mode = (
-        "eth_100lots_swing" if use_swing_target_for_partial else "eth_100lots_filtered_entries"
+        "lqdty_1d_1m_transcript" if use_swing_target_for_partial else "eth_100lots_filtered_entries"
     )
     result.rule_compliance = compliance
     return result

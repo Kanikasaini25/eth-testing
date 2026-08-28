@@ -40,6 +40,10 @@ class DeltaExchangeClient:
                 "start": start,
                 "end": end,
             },
+            headers={
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
             timeout=30,
         )
         response.raise_for_status()
@@ -55,6 +59,7 @@ class DeltaExchangeClient:
         symbol: str,
         resolution: str = "1d",
         days: int = 30,
+        on_progress=None,
     ) -> list[dict]:
         end = int(time.time())
         start = end - (days * SECONDS_PER_DAY)
@@ -71,6 +76,9 @@ class DeltaExchangeClient:
                 break
 
             all_candles.extend(batch)
+            if on_progress is not None:
+                fetched_days = (end - min(item["time"] for item in batch)) / SECONDS_PER_DAY
+                on_progress(min(days, fetched_days), days, resolution)
             earliest = min(item["time"] for item in batch)
             if earliest <= start or len(batch) < 2:
                 break
@@ -99,3 +107,19 @@ class DeltaExchangeClient:
             )
 
         return rows
+
+
+def closed_ohlcv(
+    rows: list[dict],
+    resolution: str,
+    now: float | None = None,
+) -> list[dict]:
+    """Drop the in-progress candle so live scans match the backtest (closed bars only)."""
+    now_ts = time.time() if now is None else now
+    seconds = RESOLUTION_SECONDS.get(resolution, SECONDS_PER_DAY)
+    out: list[dict] = []
+    for row in rows:
+        start = datetime.fromisoformat(row["timestamp"]).timestamp()
+        if start + seconds <= now_ts:
+            out.append(row)
+    return out

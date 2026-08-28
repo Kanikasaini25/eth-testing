@@ -1,58 +1,54 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field
 
-from src.poc_strategy import (
-    PocState,
-    group_bars_by_day,
-    process_m15_bar,
-    sync_session_state,
+from src.strategy import (
+    EntrySignal,
+    PendingSetup,
+    confirm_entry,
+    detect_liquidity_grab,
+    setup_invalidated,
+    setup_too_wide,
 )
-from src.risk import day_loss_reached, fill_risk_allowed, lots_for_risk, reached_r
-
-
-SECONDS_PER_DAY = 86400.0
+from src.swings import (
+    detect_swings,
+    epoch_of,
+    last_closed_m15_open,
+    latest_swing,
+    usable_swings,
+)
 
 
 @dataclass
 class BacktestParams:
-    target_points: float = 15.0
+    target_points: float = 30.0
     position_lots: int = 100
     fee_pct_per_side: float = 0.05
+    fee_maker_pct: float = 0.02
+    maker_on_take_profit: bool = True
+    maker_on_entry: bool = False
+    scalper_offer: bool = False
+    scalper_minutes: float = 30.0
+    gst_pct: float = 0.0
     starting_wallet_usd: float = 10000.0
     usd_per_point_per_lot: float = 0.01
-    min_sl_points: float = 5.0
-    max_sl_points: float = 10.0
-    min_reward_to_risk: float = 1.5
-    reward_r_multiple: float = 2.0
-    use_session_filter: bool = True
-    session_start_hour_utc: int = 8
-    session_end_hour_utc: int = 20
-    max_trades_per_day: int = 4
-    use_htf_bias: bool = True
-    use_risk_sizing: bool = True
-    risk_pct_per_trade: float = 1.0
-    min_lots: int = 1
-    daily_loss_pct: float = 3.0
-    max_leverage: float = 1.0
-    move_stop_to_breakeven: bool = True
-    breakeven_r_multiple: float = 1.5
-    warmup_days: float = 1.0
-    bin_size: float = 1.0
-    value_area_pct: float = 0.70
-    touch_points: float = 2.0
-    trade_poc: bool = True
-    trade_val: bool = False
-    trade_vah: bool = False
-    require_return: bool = True
-    min_away_points: float = 12.0
-    min_sweep_points: float = 2.0
-    min_close_beyond: float = 2.0
-    min_body_points: float = 0.0
-    require_open_pullback: bool = True
-    max_intraday_range: float = 100.0
-    skip_monday: bool = True
+    swing_left: int = 2
+    swing_right: int = 2
+    swing_lookback: int = 48
+    confirm_timeout_minutes: int = 90
+    sl_buffer_points: float = 1.0
+    use_stop_loss: bool = True
+    max_sl_points: float = 15.0
+    min_sweep_points: float = 3.0
+    require_reclaim: bool = True
+    require_close_back: bool = True
+    grab_on_m15_close: bool = True
+    min_confirm_body: float = 1.5
+    require_close_break: bool = False
+    one_shot_confirm: bool = False
+    breakeven_points: float = 0.0
+    partial_exit_pct: float = 80.0
+    runner_target_points: float = 90.0
 
 
 @dataclass
@@ -63,10 +59,12 @@ class OpenPosition:
     stop_loss: float
     target: float
     lots: int
-    level: float
-    entry_line: str
+    swing_price: float
+    sweep_extreme: float
+    grab_ts: str
     original_stop: float = 0.0
     breakeven_done: bool = False
+    partial_taken: bool = False
 
     def __post_init__(self) -> None:
         if self.original_stop == 0.0:
@@ -92,55 +90,38 @@ class BacktestResult:
     total_fees: float = 0.0
     avg_win_points: float = 0.0
     avg_loss_points: float = 0.0
-
-
-def params_from_rule(parameters: dict) -> BacktestParams:
-    return BacktestParams(
-        target_points=float(parameters.get("partial_target_points", 15)),
-        position_lots=int(parameters.get("position_lots", 100)),
-        fee_pct_per_side=float(parameters.get("fee_pct_per_side", 0.05)),
-        starting_wallet_usd=float(parameters.get("starting_wallet_usd", 10000)),
-        usd_per_point_per_lot=float(parameters.get("usd_per_point_per_lot", 0.01)),
-        min_sl_points=float(parameters.get("min_stop_loss_points", 5.0)),
-        max_sl_points=float(parameters.get("max_stop_loss_points", 10.0)),
-        min_reward_to_risk=float(parameters.get("min_reward_to_risk", 1.5)),
-        reward_r_multiple=float(parameters.get("reward_r_multiple", 2.0)),
-        use_session_filter=bool(parameters.get("use_session_filter", True)),
-        session_start_hour_utc=int(parameters.get("session_start_hour_utc", 8)),
-        session_end_hour_utc=int(parameters.get("session_end_hour_utc", 20)),
-        max_trades_per_day=int(parameters.get("max_trades_per_sequence", 4)),
-        use_htf_bias=bool(parameters.get("use_htf_bias", True)),
-        use_risk_sizing=bool(parameters.get("use_risk_sizing", True)),
-        risk_pct_per_trade=float(parameters.get("risk_pct_per_trade", 1.0)),
-        min_lots=int(parameters.get("min_lots", 1)),
-        daily_loss_pct=float(parameters.get("daily_loss_pct", 3.0)),
-        max_leverage=float(parameters.get("max_leverage", 1.0)),
-        move_stop_to_breakeven=bool(parameters.get("move_stop_to_breakeven", True)),
-        breakeven_r_multiple=float(parameters.get("breakeven_r_multiple", 1.5)),
-        warmup_days=float(parameters.get("warmup_days", 1.0)),
-        bin_size=float(parameters.get("bin_size", 1.0)),
-        value_area_pct=float(parameters.get("value_area_pct", 0.70)),
-        touch_points=float(parameters.get("touch_points", 2.0)),
-        trade_poc=bool(parameters.get("trade_poc", True)),
-        trade_val=bool(parameters.get("trade_val", False)),
-        trade_vah=bool(parameters.get("trade_vah", False)),
-        require_return=bool(parameters.get("require_return", True)),
-        min_away_points=float(parameters.get("min_away_points", 12.0)),
-        min_sweep_points=float(parameters.get("min_sweep_points", 2.0)),
-        min_close_beyond=float(parameters.get("min_close_beyond", 2.0)),
-        min_body_points=float(parameters.get("min_body_points", 0.0)),
-        require_open_pullback=bool(parameters.get("require_open_pullback", True)),
-        max_intraday_range=float(parameters.get("max_intraday_range", 100.0)),
-        skip_monday=bool(parameters.get("skip_monday", True)),
-    )
-
-
-def _epoch(timestamp: str) -> float:
-    return datetime.fromisoformat(timestamp).timestamp()
+    grab_count: int = 0
+    swing_count: int = 0
+    marked_high: float = 0.0
+    marked_low: float = 0.0
+    last_close: float = 0.0
+    pending_side: str = ""
+    pending_swing: float = 0.0
+    pending_sweep: float = 0.0
+    pending_grab_ts: str = ""
 
 
 def _points(side: str, entry: float, exit_price: float) -> float:
     return exit_price - entry if side == "long" else entry - exit_price
+
+
+def maybe_move_to_breakeven(position: OpenPosition, row: dict, trigger_points: float) -> None:
+    if trigger_points <= 0 or position.breakeven_done:
+        return
+    high = float(row["high"])
+    low = float(row["low"])
+    if position.side == "long":
+        if low <= position.original_stop:
+            return
+        if high >= position.entry_price + trigger_points:
+            position.stop_loss = position.entry_price
+            position.breakeven_done = True
+        return
+    if high >= position.original_stop:
+        return
+    if low <= position.entry_price - trigger_points:
+        position.stop_loss = position.entry_price
+        position.breakeven_done = True
 
 
 def check_bar_exit(position: OpenPosition, row: dict) -> tuple[str, float] | None:
@@ -159,6 +140,72 @@ def check_bar_exit(position: OpenPosition, row: dict) -> tuple[str, float] | Non
     return None
 
 
+MAKER_EXIT_REASONS = {"take_profit", "take_profit_80", "runner_take_profit"}
+
+
+def _hold_minutes(entry_ts: str, exit_ts: str) -> float:
+    return max(0.0, (epoch_of(exit_ts) - epoch_of(entry_ts)) / 60.0)
+
+
+def _fee_parts(
+    entry_price: float,
+    exit_price: float,
+    lots: int,
+    reason: str,
+    hold_minutes: float,
+    params: BacktestParams,
+) -> tuple[float, float, bool]:
+    size = lots * params.usd_per_point_per_lot
+    taker = params.fee_pct_per_side / 100.0
+    maker = params.fee_maker_pct / 100.0
+    entry_rate = maker if params.maker_on_entry else taker
+    scalped = bool(
+        params.scalper_offer and hold_minutes <= params.scalper_minutes
+    )
+    if scalped:
+        exit_rate = 0.0
+    elif params.maker_on_take_profit and reason in MAKER_EXIT_REASONS:
+        exit_rate = maker
+    else:
+        exit_rate = taker
+    gst = 1.0 + params.gst_pct / 100.0
+    entry_fee = entry_price * entry_rate * size * gst
+    exit_fee = exit_price * exit_rate * size * gst
+    return entry_fee, exit_fee, scalped
+
+
+def reprice_trades(trades: list[dict], params: BacktestParams) -> list[dict]:
+    """Rebuild fees/net/wallet from fills without re-running the strategy."""
+    wallet = params.starting_wallet_usd
+    sized = params.usd_per_point_per_lot
+    out: list[dict] = []
+    for trade in trades:
+        hold = _hold_minutes(trade["entry_ts"], trade["exit_ts"])
+        entry_fee, exit_fee, scalped = _fee_parts(
+            float(trade["entry_price"]),
+            float(trade["exit_price"]),
+            int(trade["lots"]),
+            str(trade["reason"]),
+            hold,
+            params,
+        )
+        fee = entry_fee + exit_fee
+        gross = float(trade["points"]) * int(trade["lots"]) * sized
+        net = gross - fee
+        wallet += net
+        row = dict(trade)
+        row["hold_minutes"] = round(hold, 2)
+        row["fee_entry_usd"] = round(entry_fee, 4)
+        row["fee_exit_usd"] = round(exit_fee, 4)
+        row["scalper_applied"] = scalped
+        row["gross_usd"] = round(gross, 2)
+        row["fee_usd"] = round(fee, 2)
+        row["net_usd"] = round(net, 2)
+        row["wallet"] = round(wallet, 2)
+        out.append(row)
+    return out
+
+
 def _close_trade(
     position: OpenPosition,
     exit_ts: str,
@@ -168,12 +215,20 @@ def _close_trade(
     params: BacktestParams,
 ) -> tuple[dict, float]:
     points = _points(position.side, position.entry_price, exit_price)
-    rate = params.fee_pct_per_side / 100.0
     size = position.lots * params.usd_per_point_per_lot
-    fee = (position.entry_price + exit_price) * size * rate
+    hold = _hold_minutes(position.entry_ts, exit_ts)
+    entry_fee, exit_fee, scalped = _fee_parts(
+        position.entry_price,
+        exit_price,
+        position.lots,
+        reason,
+        hold,
+        params,
+    )
+    fee = entry_fee + exit_fee
     net = points * size - fee
     wallet += net
-    risk_points = abs(position.entry_price - position.original_stop)
+    risk_points = abs(position.entry_price - position.stop_loss)
     trade = {
         "side": position.side,
         "entry_ts": position.entry_ts,
@@ -182,14 +237,19 @@ def _close_trade(
         "exit_price": round(exit_price, 4),
         "stop_loss": round(position.stop_loss, 4),
         "target": round(position.target, 4),
-        "level": round(position.level, 4),
-        "entry_line": position.entry_line,
+        "swing_price": round(position.swing_price, 4),
+        "sweep_extreme": round(position.sweep_extreme, 4),
+        "grab_ts": position.grab_ts,
         "lots": position.lots,
         "lot_usd": round(size, 2),
         "size_usd": round(position.entry_price * size, 2),
         "risk_usd": round(risk_points * size, 2),
         "points": round(points, 4),
         "gross_usd": round(points * size, 2),
+        "hold_minutes": round(hold, 2),
+        "fee_entry_usd": round(entry_fee, 4),
+        "fee_exit_usd": round(exit_fee, 4),
+        "scalper_applied": scalped,
         "fee_usd": round(fee, 2),
         "net_usd": round(net, 2),
         "reason": reason,
@@ -198,14 +258,112 @@ def _close_trade(
     return trade, wallet
 
 
-def _summarize(trades: list[dict], starting_wallet: float) -> BacktestResult:
+def _scale_out_lots(total: int, pct: float) -> int:
+    if pct <= 0 or pct >= 100 or total < 2:
+        return 0
+    closed = int(total * pct / 100.0)
+    return min(max(closed, 1), total - 1)
+
+
+def _runner_target_price(position: OpenPosition, runner_points: float) -> float:
+    if runner_points <= 0:
+        offset = 1_000_000.0
+    else:
+        offset = runner_points
+    if position.side == "long":
+        return position.entry_price + offset
+    return position.entry_price - offset
+
+
+def _slice_position(position: OpenPosition, lots: int) -> OpenPosition:
+    return OpenPosition(
+        side=position.side,
+        entry_ts=position.entry_ts,
+        entry_price=position.entry_price,
+        stop_loss=position.stop_loss,
+        target=position.target,
+        lots=lots,
+        swing_price=position.swing_price,
+        sweep_extreme=position.sweep_extreme,
+        grab_ts=position.grab_ts,
+        original_stop=position.original_stop,
+        breakeven_done=position.breakeven_done,
+        partial_taken=position.partial_taken,
+    )
+
+
+def _manage_open(
+    position: OpenPosition,
+    bar: dict,
+    wallet: float,
+    params: BacktestParams,
+) -> tuple[OpenPosition | None, list[dict], float]:
+    maybe_move_to_breakeven(position, bar, params.breakeven_points)
+    exit_hit = check_bar_exit(position, bar)
+    if exit_hit is None:
+        return position, [], wallet
+    reason, exit_price = exit_hit
+    closed = _scale_out_lots(position.lots, params.partial_exit_pct)
+    if reason == "take_profit" and not position.partial_taken and closed > 0:
+        slice_pos = _slice_position(position, closed)
+        trade, wallet = _close_trade(
+            slice_pos, bar["timestamp"], exit_price, "take_profit_80", wallet, params
+        )
+        position.lots -= closed
+        position.partial_taken = True
+        position.stop_loss = position.entry_price
+        position.breakeven_done = True
+        position.target = _runner_target_price(position, params.runner_target_points)
+        if position.side == "long" and float(bar["high"]) >= position.target:
+            rest_trade, wallet = _close_trade(
+                position, bar["timestamp"], position.target, "runner_take_profit", wallet, params
+            )
+            return None, [trade, rest_trade], wallet
+        if position.side == "short" and float(bar["low"]) <= position.target:
+            rest_trade, wallet = _close_trade(
+                position, bar["timestamp"], position.target, "runner_take_profit", wallet, params
+            )
+            return None, [trade, rest_trade], wallet
+        return position, [trade], wallet
+    label = reason if not position.partial_taken else f"runner_{reason}"
+    trade, wallet = _close_trade(
+        position, bar["timestamp"], exit_price, label, wallet, params
+    )
+    return None, [trade], wallet
+
+
+def _update_runners(
+    runners: list[OpenPosition],
+    bar: dict,
+    wallet: float,
+    params: BacktestParams,
+) -> tuple[list[OpenPosition], list[dict], float]:
+    kept: list[OpenPosition] = []
+    fills: list[dict] = []
+    for runner in runners:
+        left, done, wallet = _manage_open(runner, bar, wallet, params)
+        fills.extend(done)
+        if left is not None:
+            kept.append(left)
+    return kept, fills, wallet
+
+
+def _summarize(
+    trades: list[dict],
+    starting_wallet: float,
+    grab_count: int,
+    swing_count: int,
+) -> BacktestResult:
     ending = trades[-1]["wallet"] if trades else starting_wallet
     points = sum(trade["points"] for trade in trades)
     wins = [trade for trade in trades if trade["net_usd"] > 0]
     losses = [trade for trade in trades if trade["net_usd"] <= 0]
     win_gross = sum(trade["net_usd"] for trade in wins)
     loss_gross = abs(sum(trade["net_usd"] for trade in losses))
-    profit_factor = (win_gross / loss_gross) if loss_gross else (float("inf") if win_gross else 0.0)
+    if loss_gross:
+        profit_factor = win_gross / loss_gross
+    else:
+        profit_factor = float("inf") if win_gross else 0.0
     peak = starting_wallet
     max_dd = 0.0
     equity = [{"timestamp": "start", "wallet": starting_wallet}]
@@ -228,157 +386,180 @@ def _summarize(trades: list[dict], starting_wallet: float) -> BacktestResult:
         trade_count=len(trades),
         wins=len(wins),
         losses=len(losses),
-        tp_count=sum(1 for trade in trades if trade["reason"] == "take_profit"),
+        tp_count=sum(1 for trade in trades if str(trade["reason"]).startswith("take_profit")),
         sl_count=sum(1 for trade in trades if trade["reason"] == "stop_loss"),
         total_fees=round(sum(trade["fee_usd"] for trade in trades), 2),
         avg_win_points=round(sum(win_points) / len(win_points), 4) if win_points else 0.0,
         avg_loss_points=round(sum(loss_points) / len(loss_points), 4) if loss_points else 0.0,
+        grab_count=grab_count,
+        swing_count=swing_count,
     )
 
 
-def _maybe_move_to_breakeven(position: OpenPosition, row: dict, r_multiple: float) -> None:
-    if position.breakeven_done:
-        return
-    if not reached_r(
-        position.side,
-        position.entry_price,
-        position.original_stop,
-        float(row["high"]),
-        float(row["low"]),
-        r_multiple=r_multiple,
-    ):
-        return
-    position.stop_loss = position.entry_price
-    position.breakeven_done = True
-
-
-def _open_from_signal(signal, row: dict, params: BacktestParams, wallet: float) -> OpenPosition | None:
-    fill = float(row["close"])
-    if not fill_risk_allowed(
-        fill,
-        signal.stop_loss,
-        max_sl_points=params.max_sl_points,
-        min_reward_to_risk=params.min_reward_to_risk,
-        min_target=params.target_points,
-        reward_r=params.reward_r_multiple,
-    ):
-        return None
-    lots = lots_for_risk(
-        wallet,
-        abs(fill - signal.stop_loss),
-        risk_pct=params.risk_pct_per_trade,
-        usd_per_point=params.usd_per_point_per_lot,
-        min_lots=params.min_lots,
-        max_lots=params.position_lots,
-        use_risk_sizing=params.use_risk_sizing,
-        fallback_lots=params.position_lots,
-        entry_price=fill,
-        max_leverage=params.max_leverage,
-    )
-    if lots < 1:
-        return None
+def _open_position(signal: EntrySignal, lots: int) -> OpenPosition:
     return OpenPosition(
         side=signal.side,
-        entry_ts=row["timestamp"],
-        entry_price=fill,
+        entry_ts=signal.entry_ts,
+        entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
         target=signal.target,
         lots=lots,
-        level=signal.level,
-        entry_line=signal.entry_line,
-        original_stop=signal.stop_loss,
+        swing_price=signal.swing_price,
+        sweep_extreme=signal.sweep_extreme,
+        grab_ts=signal.grab_ts,
     )
 
 
-def _trades_on_day(trades: list[dict], day: str) -> int:
-    return sum(1 for trade in trades if trade["entry_ts"][:10] == day)
+def _arm_setup(setup: PendingSetup, bar_epoch: float) -> PendingSetup:
+    setup.grab_epoch = bar_epoch
+    setup.first_confirm = None
+    return setup
 
 
-def run_poc_backtest(m15_rows: list[dict], params: BacktestParams | None = None) -> BacktestResult:
+def _scan_new_m15_grabs(
+    m15_rows: list[dict],
+    swings,
+    swept_ids: set[str],
+    start_index: int,
+    end_index: int,
+    params: BacktestParams,
+    now: float,
+) -> tuple[PendingSetup | None, int]:
+    grab: PendingSetup | None = None
+    count = 0
+    for index in range(start_index, end_index + 1):
+        if index < 0:
+            continue
+        available = usable_swings(swings, index, params.swing_lookback, swept_ids)
+        found, taken = detect_liquidity_grab(
+            m15_rows[index],
+            available,
+            min_sweep_points=params.min_sweep_points,
+            require_close_back=params.require_close_back,
+        )
+        for swing in taken:
+            swept_ids.add(swing.swing_id)
+        if found is not None:
+            grab = _arm_setup(found, now)
+            count += 1
+    return grab, count
+
+
+def run_liquidity_backtest(
+    m15_rows: list[dict],
+    m1_rows: list[dict],
+    params: BacktestParams | None = None,
+    entry_log: list[EntrySignal] | None = None,
+) -> BacktestResult:
     params = params or BacktestParams()
-    by_day = group_bars_by_day(m15_rows)
-    days = sorted(by_day)
-    state = PocState()
+    swings = detect_swings(m15_rows, params.swing_left, params.swing_right)
+    swept_ids: set[str] = set()
+    pending: PendingSetup | None = None
     position: OpenPosition | None = None
+    runners: list[OpenPosition] = []
     trades: list[dict] = []
     wallet = params.starting_wallet_usd
-    day_start_wallet = wallet
-    trade_start = None
-    if params.warmup_days > 0 and m15_rows:
-        trade_start = _epoch(m15_rows[0]["timestamp"]) + params.warmup_days * SECONDS_PER_DAY
+    grab_count = 0
+    lots = params.position_lots
+    m15_epochs = [epoch_of(row["timestamp"]) for row in m15_rows]
+    closed_ptr = -1
 
-    for index, day in enumerate(days):
-        previous_day = days[index - 1] if index > 0 else None
-        previous_bars = by_day[previous_day] if previous_day else None
-        sync_session_state(
-            state,
-            day,
-            previous_day,
-            previous_bars,
-            bin_size=params.bin_size,
-            value_area_pct=params.value_area_pct,
-        )
-        day_start_wallet = wallet
-        for row in by_day[day]:
-            if trade_start is not None and _epoch(row["timestamp"]) < trade_start:
-                continue
-            if position is not None:
-                exit_hit = check_bar_exit(position, row)
-                if exit_hit is not None:
-                    reason, exit_price = exit_hit
-                    trade, wallet = _close_trade(
-                        position, row["timestamp"], exit_price, reason, wallet, params
-                    )
-                    trades.append(trade)
-                    position = None
-                elif params.move_stop_to_breakeven:
-                    _maybe_move_to_breakeven(position, row, params.breakeven_r_multiple)
-                continue
-            if params.max_trades_per_day > 0 and _trades_on_day(trades, day) >= params.max_trades_per_day:
-                continue
-            if day_loss_reached(day_start_wallet, wallet, params.daily_loss_pct):
-                continue
-            signal = process_m15_bar(
-                row,
-                state,
-                touch_points=params.touch_points,
-                min_target=params.target_points,
-                reward_r=params.reward_r_multiple,
-                min_sl_points=params.min_sl_points,
-                max_sl_points=params.max_sl_points,
-                min_reward_to_risk=params.min_reward_to_risk,
-                use_session_filter=params.use_session_filter,
-                session_start_hour_utc=params.session_start_hour_utc,
-                session_end_hour_utc=params.session_end_hour_utc,
-                use_htf_bias=params.use_htf_bias,
-                trade_poc=params.trade_poc,
-                trade_val=params.trade_val,
-                trade_vah=params.trade_vah,
-                require_return=params.require_return,
-                min_away_points=params.min_away_points,
-                min_sweep_points=params.min_sweep_points,
-                min_close_beyond=params.min_close_beyond,
-                min_body_points=params.min_body_points,
-                require_open_pullback=params.require_open_pullback,
-                max_intraday_range=params.max_intraday_range,
-                skip_monday=params.skip_monday,
+    for bar in m1_rows:
+        now = epoch_of(bar["timestamp"])
+        prev_closed = closed_ptr
+        closed_open = last_closed_m15_open(now)
+        while closed_ptr + 1 < len(m15_epochs) and m15_epochs[closed_ptr + 1] <= closed_open:
+            closed_ptr += 1
+
+        runners, runner_fills, wallet = _update_runners(runners, bar, wallet, params)
+        trades.extend(runner_fills)
+
+        if params.grab_on_m15_close and closed_ptr > prev_closed and position is None:
+            found, added = _scan_new_m15_grabs(
+                m15_rows, swings, swept_ids, prev_closed + 1, closed_ptr, params, now
             )
-            if signal is None:
-                continue
-            position = _open_from_signal(signal, row, params, wallet)
+            grab_count += added
+            if found is not None:
+                pending = found
+        elif not params.grab_on_m15_close and position is None:
+            available = usable_swings(swings, closed_ptr, params.swing_lookback, swept_ids)
+            found, taken = detect_liquidity_grab(
+                bar,
+                available,
+                min_sweep_points=params.min_sweep_points,
+                require_close_back=params.require_close_back,
+            )
+            for swing in taken:
+                swept_ids.add(swing.swing_id)
+            if found is not None:
+                pending = _arm_setup(found, now)
+                grab_count += 1
 
-    if position is not None and m15_rows:
-        last = m15_rows[-1]
-        trade, wallet = _close_trade(
-            position, last["timestamp"], float(last["close"]), "end_of_data", wallet, params
+        if position is not None:
+            position, fills, wallet = _manage_open(position, bar, wallet, params)
+            trades.extend(fills)
+            if position is not None and position.partial_taken:
+                runners.append(position)
+                position = None
+            continue
+
+        if pending is None:
+            continue
+        age_minutes = (now - pending.grab_epoch) / 60.0
+        if age_minutes > params.confirm_timeout_minutes:
+            pending = None
+            continue
+        if setup_invalidated(pending, bar) or (
+            params.use_stop_loss
+            and setup_too_wide(pending, params.max_sl_points, params.sl_buffer_points)
+        ):
+            pending = None
+            continue
+        signal = confirm_entry(
+            pending,
+            bar,
+            target_points=params.target_points,
+            sl_buffer=params.sl_buffer_points,
+            use_stop_loss=params.use_stop_loss,
+            max_sl_points=params.max_sl_points,
+            require_reclaim=params.require_reclaim,
+            min_confirm_body=params.min_confirm_body,
+            require_close_break=params.require_close_break,
+            one_shot_confirm=params.one_shot_confirm,
         )
-        trades.append(trade)
-    return _summarize(trades, params.starting_wallet_usd)
+        if signal is None:
+            if pending.failed:
+                pending = None
+            continue
+        if entry_log is not None:
+            entry_log.append(signal)
+        position = _open_position(signal, lots)
+        pending = None
+        position, fills, wallet = _manage_open(position, bar, wallet, params)
+        trades.extend(fills)
+        if position is not None and position.partial_taken:
+            runners.append(position)
+            position = None
 
-
-def run_m15_backtest(m15_rows: list[dict], _m1_rows=None, params: BacktestParams | None = None):
-    return run_poc_backtest(m15_rows, params)
-
-
-def result_to_dict(result: BacktestResult) -> dict:
-    return asdict(result)
+    last = m1_rows[-1] if m1_rows else None
+    open_left = ([position] if position is not None else []) + runners
+    if last is not None:
+        for leftover in open_left:
+            reason = "end_of_data" if not leftover.partial_taken else "runner_end_of_data"
+            trade, wallet = _close_trade(
+                leftover, last["timestamp"], float(last["close"]), reason, wallet, params
+            )
+            trades.append(trade)
+    result = _summarize(trades, params.starting_wallet_usd, grab_count, len(swings))
+    available = usable_swings(swings, closed_ptr, params.swing_lookback, swept_ids)
+    high = latest_swing(available, "high")
+    low = latest_swing(available, "low")
+    result.marked_high = high.price if high is not None else 0.0
+    result.marked_low = low.price if low is not None else 0.0
+    result.last_close = float(last["close"]) if last is not None else 0.0
+    if pending is not None:
+        result.pending_side = pending.side
+        result.pending_swing = pending.swing.price
+        result.pending_sweep = pending.sweep_extreme
+        result.pending_grab_ts = pending.grab_ts
+    return result

@@ -147,9 +147,40 @@ class DeltaTradingClient:
         raw = position.get("entry_price")
         return float(raw) if raw not in (None, "") else None
 
+    def get_asset_balance(self, asset_symbol: str) -> float:
+        balances = self.client.get_all_wallet_balances() or []
+        target = asset_symbol.upper()
+        if isinstance(balances, dict):
+            balances = balances.get("result") or balances.get("balances") or []
+        for item in balances:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(
+                item.get("asset_symbol")
+                or item.get("symbol")
+                or (item.get("asset") or {}).get("symbol")
+                or ""
+            ).upper()
+            if symbol != target:
+                continue
+            raw = (
+                item.get("available_balance")
+                or item.get("balance")
+                or item.get("available_cash")
+                or 0
+            )
+            return float(raw)
+        return 0.0
+
+    def _size_for_order(self, size: float | int) -> int | float:
+        as_float = float(size)
+        if as_float == int(as_float):
+            return int(as_float)
+        return as_float
+
     def place_market_order(
         self,
-        size: int,
+        size: float | int,
         side: str,
         *,
         symbol: str | None = None,
@@ -157,7 +188,7 @@ class DeltaTradingClient:
     ) -> dict[str, Any]:
         return self.client.place_order(
             product_id=self.get_product_id(symbol),
-            size=int(size),
+            size=self._size_for_order(size),
             side=side,
             order_type=OrderType.MARKET,
             reduce_only="true" if reduce_only else "false",
@@ -171,6 +202,7 @@ class DeltaTradingClient:
         *,
         symbol: str | None = None,
         reduce_only: bool = False,
+        post_only: bool = False,
     ) -> dict[str, Any]:
         return self.client.place_order(
             product_id=self.get_product_id(symbol),
@@ -178,6 +210,7 @@ class DeltaTradingClient:
             side=side,
             limit_price=limit_price,
             order_type=OrderType.LIMIT,
+            post_only="true" if post_only else "false",
             reduce_only="true" if reduce_only else "false",
         )
 

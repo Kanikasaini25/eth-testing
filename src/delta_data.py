@@ -7,6 +7,8 @@ import requests
 
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
+MAX_RETRIES = 4
+RETRY_BACKOFF_SECONDS = 1.5
 
 RESOLUTION_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -32,27 +34,35 @@ class DeltaExchangeClient:
         start: int,
         end: int,
     ) -> list[dict]:
-        response = requests.get(
-            f"{self.base_url}/v2/history/candles",
-            params={
-                "symbol": symbol,
-                "resolution": resolution,
-                "start": start,
-                "end": end,
-            },
-            headers={
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-
-        if not payload.get("success"):
-            raise RuntimeError(f"Delta Exchange API error: {payload}")
-
-        return payload.get("result", [])
+        """Delta's candle endpoint returns intermittent 5xx, so retry with backoff."""
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.get(
+                    f"{self.base_url}/v2/history/candles",
+                    params={
+                        "symbol": symbol,
+                        "resolution": resolution,
+                        "start": start,
+                        "end": end,
+                    },
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Pragma": "no-cache",
+                    },
+                    timeout=30,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("success"):
+                    raise RuntimeError(f"Delta Exchange API error: {payload}")
+                return payload.get("result", [])
+            except (requests.RequestException, RuntimeError) as exc:
+                last_error = exc
+                if attempt == MAX_RETRIES - 1:
+                    break
+                time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+        raise RuntimeError(f"Candle fetch failed for {symbol} {resolution}: {last_error}")
 
     def fetch_historical_ohlcv(
         self,
@@ -102,11 +112,26 @@ class DeltaExchangeClient:
                     "high": float(candle["high"]),
                     "low": float(candle["low"]),
                     "close": float(candle["close"]),
-                    "volume": float(candle["volume"]),
+                    "volume": float(candle["volume"] or 0),
                 }
             )
 
         return rows
+
+    def fetch_ticker(self, symbol: str) -> dict:
+        response = requests.get(
+            f"{self.base_url}/v2/tickers/{symbol}",
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("success"):
+            raise RuntimeError(f"Delta Exchange ticker error: {payload}")
+        return payload.get("result") or {}
+
+    def fetch_funding_ohlcv(self, symbol: str, days: int = 14, resolution: str = "1h") -> list[dict]:
+        return self.fetch_historical_ohlcv(f"FUNDING:{symbol}", resolution, days)
 
 
 def closed_ohlcv(

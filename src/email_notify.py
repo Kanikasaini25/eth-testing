@@ -60,10 +60,10 @@ def notify_event(subject: str, lines: list[str]) -> EmailResult:
 def send_test_email() -> EmailResult:
     recipients = notify_recipients()
     return notify_event(
-        "ETHUSD 15m grab — test email",
+        "ETHUSD 100-lot strategies — test email",
         [
-            "This is a test from the 15m liquidity-grab live runner.",
+            "This is a test from the ETHUSD live runner.",
             f"Recipients configured: {len(recipients)}",
-            "You will get mail on buy/sell signals, entries, 80% scale-outs, and closes.",
+            "You will get mail on range/trend/funding entries, fills, and closes.",
         ],
     )

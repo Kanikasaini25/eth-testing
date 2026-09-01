@@ -13,6 +13,7 @@ def generate_report(
     results: list[BacktestResult],
     symbol: str,
     resolution: str,
+    base_url: str,
 ) -> str:
     lines = [
         "# Strategy Backtest Report",
@@ -21,6 +22,7 @@ def generate_report(
         f"- URL: {video_url}",
         "",
         "## Market Data",
+        f"- API: {base_url}",
         f"- Symbol: {symbol}",
         f"- Timeframe: {resolution}",
         "",

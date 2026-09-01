@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import date, timedelta
 
 import streamlit as st
 
@@ -21,6 +22,7 @@ from src.delta_trading import DeltaTradingClient, is_testnet_url
 from src.email_notify import is_email_configured, is_email_enabled, send_test_email
 from src.live_strategy import LiveLiquidityRunner, default_rules_path
 from src.pipeline import run_pipeline
+from src.timezone import delta_candle_day
 
 st.set_page_config(
     page_title="YouTube Strategy Backtester",
@@ -82,8 +84,11 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
                 "Exit Lots": trade.lots,
                 "Points": trade.points,
                 "P/L ($)": _format_usd(pnl_usd),
-                "P/L (lot-pts)": lot_points,
-                "Return %": trade.return_pct,
+                "P/L (lot-pts) (gross)": lot_points,
+                "Price Return % (gross)": trade.return_pct,
+                "Initial SL (profit trade)": (
+                    f"{trade.stop_loss:.2f}" if trade.points > 0 else "—"
+                ),
                 "Wallet": _format_usd(trade.wallet_balance),
                 "Exit Reason": trade.exit_reason,
             }
@@ -129,8 +134,9 @@ def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> 
             "Exit Lots": "",
             "Points": "",
             "P/L ($)": _format_usd(totals["net_usd"]),
-            "P/L (lot-pts)": totals["total_lot_points"],
-            "Return %": "",
+            "P/L (lot-pts) (gross)": totals["total_lot_points"],
+            "Price Return % (gross)": "",
+            "Initial SL (profit trade)": "",
             "Wallet": _format_usd(totals["final_wallet"]),
             "Exit Reason": "",
         }
@@ -178,15 +184,21 @@ def render_sidebar() -> dict:
         options=["1d", "4h", "1h", "15m"],
         index=0,
     )
-    days = st.sidebar.slider(
-        "Backtest days (1d lines + 1m entries)",
-        min_value=1,
-        max_value=365,
-        value=min(365, int(get_env("BACKTEST_DAYS", "30"))),
-        step=1,
-        help=f"Same period for daily liquidity lines and 1m execution. "
-        f"1 day = {CANDLES_PER_DAY_1M} one-minute candles.",
+    default_days = min(365, int(get_env("BACKTEST_DAYS", "30")))
+    st.sidebar.subheader("Backtest date range")
+    start_date = st.sidebar.date_input(
+        "Start date (Delta daily candle UTC)",
+        value=date.today() - timedelta(days=default_days - 1),
+        min_value=date(2017, 1, 1),
+        max_value=date.today(),
     )
+    end_date = st.sidebar.date_input(
+        "End date (Delta daily candle UTC)",
+        value=date.today(),
+        min_value=date(2017, 1, 1),
+        max_value=date.today(),
+    )
+    days = (end_date - start_date).days + 1
     st.sidebar.caption(
         f"**{days} days** → ~**{expected_1m_candles(days):,}** 1m candles "
         f"({CANDLES_PER_DAY_1M} per day)"
@@ -209,6 +221,8 @@ def render_sidebar() -> dict:
         "symbol": symbol.strip().upper(),
         "resolution": resolution,
         "days": days,
+        "start_date": start_date,
+        "end_date": end_date,
         "starting_wallet_usd": starting_wallet,
         "base_url": base_url,
         "languages": [lang.strip() for lang in languages.split(",") if lang.strip()],
@@ -217,6 +231,7 @@ def render_sidebar() -> dict:
 
 def render_overview(result) -> None:
     st.subheader("Overview")
+    st.caption(f"Data source: **{result.base_url}** · All candle and trade times: **UTC**")
 
     cols = st.columns(5)
     cols[0].metric("Video ID", result.video_id)
@@ -250,33 +265,80 @@ def render_overview(result) -> None:
         )
 
 
-def render_price_chart(ohlcv: list[dict]) -> None:
+def render_price_chart(
+    ohlcv: list[dict],
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> None:
     st.subheader("ETH Price History")
-    closes = [float(row["close"]) for row in ohlcv]
-    if not closes:
-        st.write("No price data available.")
+    if start_date and end_date:
+        ohlcv = [
+            row
+            for row in ohlcv
+            if start_date
+            <= date.fromisoformat(delta_candle_day(str(row["timestamp"])))
+            <= end_date
+        ]
+    if not ohlcv:
+        st.write("No price data available for the selected date range.")
         return
 
-    width, height = 900, 220
-    min_price = min(closes)
-    max_price = max(closes)
+    width, height = 900, 300
+    highs = [float(row["high"]) for row in ohlcv]
+    lows = [float(row["low"]) for row in ohlcv]
+    closes = [float(row["close"]) for row in ohlcv]
+    min_price = min(lows)
+    max_price = max(highs)
     price_range = max(max_price - min_price, 1e-9)
 
-    points: list[str] = []
+    def y_for_price(price: float) -> float:
+        return height - ((price - min_price) / price_range) * (height - 50) - 30
+
+    close_points: list[str] = []
+    range_lines: list[str] = []
+    markers: list[str] = []
     for index, price in enumerate(closes):
-        x = (index / max(len(closes) - 1, 1)) * width
-        y = height - ((price - min_price) / price_range) * (height - 20) - 10
-        points.append(f"{x:.1f},{y:.1f}")
+        x = (index / max(len(closes) - 1, 1)) * (width - 20) + 10
+        high_y = y_for_price(highs[index])
+        low_y = y_for_price(lows[index])
+        close_y = y_for_price(price)
+        close_points.append(f"{x:.1f},{close_y:.1f}")
+        range_lines.append(
+            f'<line x1="{x:.1f}" y1="{high_y:.1f}" x2="{x:.1f}" '
+            f'y2="{low_y:.1f}" stroke="#9ca3af" stroke-width="2" />'
+        )
+        date_label = delta_candle_day(str(ohlcv[index].get("timestamp", "")))
+        markers.append(
+            f'<circle cx="{x:.1f}" cy="{high_y:.1f}" r="4" fill="#16a34a">'
+            f"<title>{date_label} high: ${highs[index]:,.2f}</title></circle>"
+            f'<circle cx="{x:.1f}" cy="{low_y:.1f}" r="4" fill="#dc2626">'
+            f"<title>{date_label} low: ${lows[index]:,.2f}</title></circle>"
+        )
 
     svg = f"""
     <svg width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+      {"".join(range_lines)}
       <polyline fill="none" stroke="#1f77b4" stroke-width="2"
-        points="{" ".join(points)}" />
-      <text x="0" y="12" fill="#666" font-size="12">${max_price:,.2f}</text>
-      <text x="0" y="{height - 4}" fill="#666" font-size="12">${min_price:,.2f}</text>
+        points="{" ".join(close_points)}" />
+      {"".join(markers)}
+      <text x="0" y="16" fill="#666" font-size="12">${max_price:,.2f}</text>
+      <text x="0" y="{height - 8}" fill="#666" font-size="12">${min_price:,.2f}</text>
     </svg>
     """
     st.markdown(svg, unsafe_allow_html=True)
+    st.caption("Blue = close · Green = daily high · Red = daily low · Hover markers for date and price.")
+    st.dataframe(
+        [
+            {
+                "Date": delta_candle_day(str(row.get("timestamp", ""))),
+                "High": float(row["high"]),
+                "Low": float(row["low"]),
+            }
+            for row in ohlcv
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
     st.caption(f"{ohlcv[0]['timestamp'][:10]} → {ohlcv[-1]['timestamp'][:10]}")
 
 
@@ -537,6 +599,8 @@ def _render_backtest_page(settings: dict) -> None:
                 starting_wallet_usd=settings["starting_wallet_usd"],
                 base_url=settings["base_url"],
                 languages=settings["languages"],
+                start_date=settings["start_date"],
+                end_date=settings["end_date"],
             )
     except Exception as exc:  # noqa: BLE001
         st.error(f"Pipeline failed: {exc}")
@@ -550,7 +614,11 @@ def _render_backtest_page(settings: dict) -> None:
 
     with tab_overview:
         render_overview(result)
-        render_price_chart(result.ohlcv)
+        render_price_chart(
+            result.ohlcv,
+            start_date=settings["start_date"],
+            end_date=settings["end_date"],
+        )
 
     with tab_rules:
         st.subheader("Extracted Techniques")
@@ -629,6 +697,10 @@ def _render_backtest_page(settings: dict) -> None:
 
     with tab_trades:
         st.subheader("Trade Log")
+        st.caption(
+            "P/L ($) is net after fees. Gross points/price return can be positive "
+            "while net P/L is negative."
+        )
         starting_wallet = settings["starting_wallet_usd"]
         for backtest in result.results:
             with st.expander(f"{backtest.rule_name} ({len(backtest.trades)} exits)", expanded=True):

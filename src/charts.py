@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from src.backtest import BacktestResult, Trade
+from src.timezone import delta_candle_day
 
 
 def _group_trade_entries(trades: list[Trade]) -> list[dict]:
@@ -192,7 +193,7 @@ def render_win_loss_summary(backtest: BacktestResult) -> str:
 
 def _day_index(ohlcv: list[dict], date_prefix: str) -> int | None:
     for index, row in enumerate(ohlcv):
-        if row["timestamp"][:10] == date_prefix[:10]:
+        if delta_candle_day(str(row["timestamp"])) == date_prefix[:10]:
             return index
     return None
 
@@ -209,7 +210,7 @@ def render_trades_on_price(ohlcv: list[dict], backtest: BacktestResult) -> str:
     indices = sorted(
         index
         for index, row in enumerate(ohlcv)
-        if row["timestamp"][:10] in trade_days
+        if delta_candle_day(str(row["timestamp"])) in trade_days
     )
     if not indices:
         indices = list(range(max(0, len(ohlcv) - 60), len(ohlcv)))
@@ -265,7 +266,8 @@ def render_trades_on_price(ohlcv: list[dict], backtest: BacktestResult) -> str:
       <text x="0" y="{pad_top + 4}" fill="#666" font-size="11">${max_price:,.2f}</text>
       <text x="0" y="{height - 6}" fill="#666" font-size="11">${min_price:,.2f}</text>
       <text x="4" y="{height - 6}" fill="#666" font-size="10">
-        {window[0]["timestamp"][:10]} → {window[-1]["timestamp"][:10]}
+        {delta_candle_day(str(window[0]["timestamp"]))}
+        → {delta_candle_day(str(window[-1]["timestamp"]))}
       </text>
     </svg>
     """

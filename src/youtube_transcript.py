@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 from urllib.parse import parse_qs, urlparse
 
+import requests
 from youtube_transcript_api import (
     NoTranscriptFound,
     TranscriptsDisabled,
@@ -11,6 +13,13 @@ from youtube_transcript_api import (
 )
 
 VIDEO_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{11}$")
+
+
+def _youtube_http_client() -> requests.Session:
+    """Create a YouTube client that avoids blocked inherited proxies by default."""
+    session = requests.Session()
+    session.trust_env = os.getenv("YOUTUBE_USE_ENV_PROXY", "false").lower() == "true"
+    return session
 
 
 def extract_video_id(url: str) -> str | None:
@@ -47,7 +56,7 @@ def fetch_transcript_text(url: str, languages: list[str] | None = None) -> dict[
     if not video_id:
         raise ValueError(f"Invalid YouTube URL: {url}")
 
-    api = YouTubeTranscriptApi()
+    api = YouTubeTranscriptApi(http_client=_youtube_http_client())
 
     try:
         transcript = api.fetch(video_id, languages=languages)

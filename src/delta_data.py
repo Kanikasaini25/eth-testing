@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import csv
+import os
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -43,6 +44,10 @@ def trim_ohlcv_to_days(rows: list[dict], days: int, resolution: str = "1m") -> l
 class DeltaExchangeClient:
     def __init__(self, base_url: str = "https://api.india.delta.exchange") -> None:
         self.base_url = base_url.rstrip("/")
+        self.http_client = requests.Session()
+        self.http_client.trust_env = (
+            os.getenv("DELTA_USE_ENV_PROXY", "false").lower() == "true"
+        )
 
     def fetch_candles(
         self,
@@ -51,7 +56,7 @@ class DeltaExchangeClient:
         start: int,
         end: int,
     ) -> list[dict]:
-        response = requests.get(
+        response = self.http_client.get(
             f"{self.base_url}/v2/history/candles",
             params={
                 "symbol": symbol,
@@ -74,9 +79,27 @@ class DeltaExchangeClient:
         symbol: str,
         resolution: str = "1d",
         days: int = 730,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> list[dict]:
-        end = int(time.time())
-        start = end - (days * SECONDS_PER_DAY)
+        if end_date is None:
+            end = int(time.time())
+        else:
+            end_datetime = datetime.combine(
+                end_date + timedelta(days=1),
+                datetime_time.min,
+                tzinfo=timezone.utc,
+            )
+            end = int(end_datetime.timestamp())
+        if start_date is None:
+            start = end - (days * SECONDS_PER_DAY)
+        else:
+            start_datetime = datetime.combine(
+                start_date,
+                datetime_time.min,
+                tzinfo=timezone.utc,
+            )
+            start = int(start_datetime.timestamp())
         seconds_per_candle = RESOLUTION_SECONDS.get(resolution, SECONDS_PER_DAY)
         chunk_seconds = CANDLES_PER_REQUEST * seconds_per_candle
 

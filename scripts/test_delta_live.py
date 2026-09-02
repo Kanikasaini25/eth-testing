@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test Delta Exchange demo/live API connection and optional test buy."""
+"""Test Delta Exchange live API connection and optional test buy."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from src.delta_trading import DeltaTradingClient, is_testnet_url
+from src.delta_trading import DeltaTradingClient
 
 
 def main() -> int:
@@ -27,7 +27,7 @@ def main() -> int:
     client = DeltaTradingClient()
     snapshot = client.test_connection()
 
-    env_label = "TESTNET (demo)" if is_testnet_url(snapshot.base_url) else "PRODUCTION"
+    env_label = "PRODUCTION"
     print(f"Environment: {env_label}")
     print(f"Base URL: {snapshot.base_url}")
     print(f"Symbol: {snapshot.symbol}")

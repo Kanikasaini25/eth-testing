@@ -18,7 +18,7 @@ from src.charts import (
 )
 from src.config import get_env
 from src.delta_data import CANDLES_PER_DAY_1M, expected_1m_candles
-from src.delta_trading import DeltaTradingClient, is_testnet_url
+from src.delta_trading import DeltaTradingClient
 from src.email_notify import is_email_configured, is_email_enabled, send_test_email
 from src.live_strategy import LiveLiquidityRunner, default_rules_path
 from src.pipeline import run_pipeline
@@ -163,15 +163,14 @@ def render_sidebar() -> dict:
 
     exchange = st.sidebar.selectbox(
         "Delta Exchange",
-        options=["India Demo (Testnet)", "India Live", "Global"],
+        options=["India Live", "Global"],
         index=(
             0
-            if "testnet" in get_env("DELTA_BASE_URL", "").lower()
+            if "india" in get_env("DELTA_BASE_URL", "").lower()
             else 1
         ),
     )
     exchange_urls = {
-        "India Demo (Testnet)": "https://cdn-ind.testnet.deltaex.org",
         "India Live": "https://api.india.delta.exchange",
         "Global": "https://api.delta.exchange",
     }
@@ -213,7 +212,7 @@ def render_sidebar() -> dict:
     )
     languages = st.sidebar.text_input("Transcript languages", value=get_env("LANGUAGES", "en"))
 
-    run = st.sidebar.button("Run Analysis", type="primary", use_container_width=True)
+    run = st.sidebar.button("Run Analysis", type="primary", width="stretch")
 
     return {
         "run": run,
@@ -337,14 +336,14 @@ def render_price_chart(
             for row in ohlcv
         ],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.caption(f"{ohlcv[0]['timestamp'][:10]} → {ohlcv[-1]['timestamp'][:10]}")
 
 
-def render_demo_account(symbol: str, base_url: str) -> None:
-    st.subheader("Delta Demo / Live Account")
-    env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
+def render_live_account(symbol: str, base_url: str) -> None:
+    st.subheader("Delta Live Account")
+    env_label = "Production"
     st.caption(f"Environment: **{env_label}** · `{base_url}` · Symbol: **{symbol}**")
 
     client = DeltaTradingClient(base_url=base_url, symbol=symbol)
@@ -401,8 +400,8 @@ def render_demo_account(symbol: str, base_url: str) -> None:
         st.error(f"Connection failed: {snapshot.error}")
         st.markdown(
             "**Checklist:**\n"
-            "- Demo keys must use `https://cdn-ind.testnet.deltaex.org`\n"
             "- Live keys must use `https://api.india.delta.exchange`\n"
+            "- Global keys must use `https://api.delta.exchange`\n"
             "- Whitelist your IP in Delta API settings\n"
             "- Enable **Read** + **Trade** permissions"
         )
@@ -426,7 +425,7 @@ def render_demo_account(symbol: str, base_url: str) -> None:
             }
             for w in snapshot.wallet_balances
         ]
-        st.dataframe(wallet_rows, use_container_width=True)
+        st.dataframe(wallet_rows, width="stretch")
     else:
         st.write("No wallet data returned.")
 
@@ -446,8 +445,8 @@ def render_demo_account(symbol: str, base_url: str) -> None:
 
 
 def render_live_strategy(symbol: str, base_url: str) -> None:
-    st.subheader("LQDTY Live Strategy → Demo Account")
-    env_label = "Demo (Testnet)" if is_testnet_url(base_url) else "Production"
+    st.subheader("LQDTY Live Strategy → Live Account")
+    env_label = "Production"
     st.caption(
         f"Runs the same liquidity strategy as backtest on **{env_label}**. "
         f"100 lots entry · 80 partial @ +15 pts · 20 runner with 3 pt trail."
@@ -558,12 +557,12 @@ def main() -> None:
 
     settings = render_sidebar()
 
-    demo_tab, live_tab, backtest_tab = st.tabs(["Demo Account", "Live Strategy", "Backtest"])
+    live_account_tab, live_strategy_tab, backtest_tab = st.tabs(["Live Account", "Live Strategy", "Backtest"])
 
-    with demo_tab:
-        render_demo_account(settings["symbol"], settings["base_url"])
+    with live_account_tab:
+        render_live_account(settings["symbol"], settings["base_url"])
 
-    with live_tab:
+    with live_strategy_tab:
         render_live_strategy(settings["symbol"], settings["base_url"])
 
     with backtest_tab:
@@ -649,7 +648,7 @@ def _render_backtest_page(settings: dict) -> None:
 
     with tab_results:
         st.subheader("Backtest Summary")
-        st.dataframe(_results_table(result.results), use_container_width=True)
+        st.dataframe(_results_table(result.results), width="stretch")
 
         compare_cols = st.columns(len(result.results))
         for index, backtest in enumerate(result.results):
@@ -708,7 +707,7 @@ def _render_backtest_page(settings: dict) -> None:
                     totals = _trades_totals(backtest, starting_wallet)
                     st.dataframe(
                         _trades_table_with_total(backtest, starting_wallet),
-                        use_container_width=True,
+                        width="stretch",
                     )
                     pnl_col1, pnl_col2, pnl_col3, pnl_col4 = st.columns(4)
                     pnl_col1.metric(

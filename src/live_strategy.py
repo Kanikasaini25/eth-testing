@@ -659,6 +659,11 @@ class LiveLiquidityRunner:
                 if position.target_stage > 0:
                     self.state.session.reentry_side = position.side
                     self.state.session.reentry_pullback_seen = False
+                else:
+                    if position.entry_line == "upper":
+                        self.state.session.upper_rearmed = True
+                    elif position.entry_line == "lower":
+                        self.state.session.lower_rearmed = True
                 actions.extend(self._execute_full_stop(position, mark_price))
 
         return actions

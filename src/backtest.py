@@ -808,6 +808,10 @@ def backtest_liquidity_intraday(
                 if target_stage == 0:
                     full_sl_count += 1
                     if entry_line == "upper":
+                        upper_rearmed = True
+                    elif entry_line == "lower":
+                        lower_rearmed = True
+                    if entry_line == "upper":
                         upper_line_blocked = True
                     elif entry_line == "lower":
                         lower_line_blocked = True

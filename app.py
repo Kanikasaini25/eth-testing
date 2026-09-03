@@ -217,7 +217,11 @@ def render_sidebar() -> dict:
     )
     languages = st.sidebar.text_input("Transcript languages", value=get_env("LANGUAGES", "en"))
 
-    run = st.sidebar.button("Run Analysis", type="primary", width="stretch")
+    run = st.sidebar.button(
+        "Run Analysis",
+        type="primary",
+        use_container_width=True,
+    )
 
     return {
         "run": run,
@@ -341,7 +345,7 @@ def render_price_chart(
             for row in ohlcv
         ],
         hide_index=True,
-        width="stretch",
+            use_container_width=True,
     )
     st.caption(f"{ohlcv[0]['timestamp'][:10]} → {ohlcv[-1]['timestamp'][:10]}")
 
@@ -430,7 +434,7 @@ def render_live_account(symbol: str, base_url: str) -> None:
             }
             for w in snapshot.wallet_balances
         ]
-        st.dataframe(wallet_rows, width="stretch")
+        st.dataframe(wallet_rows, use_container_width=True)
     else:
         st.write("No wallet data returned.")
 
@@ -653,7 +657,7 @@ def _render_backtest_page(settings: dict) -> None:
 
     with tab_results:
         st.subheader("Backtest Summary")
-        st.dataframe(_results_table(result.results), width="stretch")
+        st.dataframe(_results_table(result.results), use_container_width=True)
 
         compare_cols = st.columns(len(result.results))
         for index, backtest in enumerate(result.results):
@@ -712,7 +716,7 @@ def _render_backtest_page(settings: dict) -> None:
                     totals = _trades_totals(backtest, starting_wallet)
                     st.dataframe(
                         _trades_table_with_total(backtest, starting_wallet),
-                        width="stretch",
+                        use_container_width=True,
                     )
                     pnl_col1, pnl_col2, pnl_col3, pnl_col4 = st.columns(4)
                     pnl_col1.metric(

@@ -111,7 +111,7 @@ def send_entry_signal_email(
             f"Upper line:  {upper_level if upper_level is not None else '—'}",
             f"Lower line:  {lower_level if lower_level is not None else '—'}",
             "",
-            "Order placed on Delta Exchange demo/live account.",
+            "Order placed on Delta Exchange live account.",
         ]
     )
     return send_email(subject, body)

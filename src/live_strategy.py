@@ -122,7 +122,7 @@ def load_liquidity_rule(path: Path | None = None) -> TradingRule:
 
 
 class LiveLiquidityRunner:
-    """Run LQDTY liquidity strategy on Delta demo/live account."""
+    """Run LQDTY liquidity strategy on Delta live account."""
 
     def __init__(
         self,

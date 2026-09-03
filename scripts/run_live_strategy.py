@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run LQDTY live strategy on Delta demo/live account."""
+"""Run LQDTY live strategy on Delta live account."""
 
 from __future__ import annotations
 

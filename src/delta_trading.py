@@ -7,7 +7,6 @@ from delta_rest_client import DeltaRestClient, OrderType
 
 from src.config import get_env
 
-TESTNET_INDIA_URL = "https://cdn-ind.testnet.deltaex.org"
 PRODUCTION_INDIA_URL = "https://api.india.delta.exchange"
 
 
@@ -37,7 +36,7 @@ class DeltaAccountSnapshot:
 
 
 class DeltaTradingClient:
-    """Authenticated Delta Exchange client for demo/live trading."""
+    """Authenticated Delta Exchange client for live trading."""
 
     def __init__(
         self,
@@ -48,7 +47,7 @@ class DeltaTradingClient:
     ) -> None:
         self.api_key = api_key or get_env("DELTA_API_KEY")
         self.api_secret = api_secret or get_env("DELTA_API_SECRET")
-        self.base_url = (base_url or get_env("DELTA_BASE_URL", TESTNET_INDIA_URL)).rstrip("/")
+        self.base_url = (base_url or get_env("DELTA_BASE_URL", PRODUCTION_INDIA_URL)).rstrip("/")
         self.symbol = symbol or get_env("DELTA_SYMBOL", "ETHUSD")
         self._client: DeltaRestClient | None = None
         self._product_cache: dict[str, dict[str, Any]] = {}
@@ -449,5 +448,3 @@ class DeltaTradingClient:
         return orders or []
 
 
-def is_testnet_url(base_url: str) -> bool:
-    return "testnet" in base_url.lower()

@@ -72,6 +72,7 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
     rows: list[dict] = []
     for trade in result.trades:
         pnl_usd = trade.pnl_usd
+        gross_pnl_usd = trade.points * trade.lots * 0.01
         lot_points = round(trade.points * trade.lots, 2)
         rows.append(
             {
@@ -83,7 +84,8 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
                 "Entry Lots": trade.entry_lots,
                 "Exit Lots": trade.lots,
                 "Points": trade.points,
-                "P/L ($)": _format_usd(pnl_usd),
+                "Gross P/L ($)": _format_usd(gross_pnl_usd),
+                "Net P/L ($)": _format_usd(pnl_usd),
                 "P/L (lot-pts) (gross)": lot_points,
                 "Price Return % (gross)": trade.return_pct,
                 "Initial SL (profit trade)": (
@@ -98,6 +100,7 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
 
 def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, float | int]:
     total_lot_points = sum(trade.points * trade.lots for trade in result.trades)
+    total_gross_usd = sum(trade.points * trade.lots * 0.01 for trade in result.trades)
     total_pnl_usd = sum(trade.pnl_usd for trade in result.trades)
     final_wallet = result.trades[-1].wallet_balance if result.trades else starting_wallet
     net_usd = round(final_wallet - starting_wallet, 2)
@@ -109,6 +112,7 @@ def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, 
             losses += 1
     return {
         "total_lot_points": round(total_lot_points, 2),
+        "total_gross_usd": round(total_gross_usd, 2),
         "total_pnl_usd": round(total_pnl_usd, 2),
         "net_usd": net_usd,
         "final_wallet": round(final_wallet, 2),
@@ -133,7 +137,8 @@ def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> 
             "Entry Lots": "",
             "Exit Lots": "",
             "Points": "",
-            "P/L ($)": _format_usd(totals["net_usd"]),
+            "Gross P/L ($)": _format_usd(totals["total_gross_usd"]),
+            "Net P/L ($)": _format_usd(totals["net_usd"]),
             "P/L (lot-pts) (gross)": totals["total_lot_points"],
             "Price Return % (gross)": "",
             "Initial SL (profit trade)": "",
@@ -698,8 +703,8 @@ def _render_backtest_page(settings: dict) -> None:
     with tab_trades:
         st.subheader("Trade Log")
         st.caption(
-            "P/L ($) is net after fees. Gross points/price return can be positive "
-            "while net P/L is negative."
+            "Net P/L ($) = gross trade P/L minus trading and platform fees. "
+            "Gross P/L can be positive while Net P/L is negative."
         )
         starting_wallet = settings["starting_wallet_usd"]
         for backtest in result.results:
@@ -725,7 +730,7 @@ def _render_backtest_page(settings: dict) -> None:
                     st.caption(
                         f"Starting wallet: **{_format_usd(starting_wallet)}** → "
                         f"Final: **{_format_usd(totals['final_wallet'])}** · "
-                        f"**P/L ($)** = net USD per exit (price move × ETH size − entry/exit fees)"
+                        f"**Net P/L ($)** = gross price P/L minus entry/exit trading and platform fees"
                     )
                 else:
                     st.write("No trades generated.")

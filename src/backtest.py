@@ -668,6 +668,9 @@ def backtest_liquidity_intraday(
         )
     )
     fee_pct_per_side = float(rule.parameters.get("fee_pct_per_side", 0.05))
+    fee_pct_per_side += float(
+        rule.parameters.get("platform_fee_pct_per_side", 0.0)
+    )
     starting_wallet = float(rule.parameters.get("starting_wallet_usd", 10_000))
 
     trades: list[Trade] = []

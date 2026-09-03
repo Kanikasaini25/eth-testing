@@ -110,6 +110,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "swing_lookback_days": 20,
                 "runner_swing_lookback_days": 60,
                 "fee_pct_per_side": 0.05,
+                "platform_fee_pct_per_side": 0.0,
             },
             source_quotes=[
                 _extract_quote(text, "वन डे का टाइम फ्रेम")

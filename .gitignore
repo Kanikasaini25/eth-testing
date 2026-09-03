@@ -2,5 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
-data/
+data/live
+data/ohlcv
+data/transcripts
 transcripts.txt

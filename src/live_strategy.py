@@ -15,9 +15,12 @@ from src.backtest import (
     _passes_liquidity_entry_filters,
     _signal_body_ratio,
 )
-from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs
+from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs, get_env
 from src.delta_data import DeltaExchangeClient
 from src.delta_trading import DeltaTradingClient
+
+# Signals follow India live; orders go to DELTA_BASE_URL (usually demo/testnet).
+INDIA_LIVE_DATA_URL = "https://api.india.delta.exchange"
 from src.email_notify import (
     send_entry_signal_email,
     send_partial_exit_email,
@@ -122,7 +125,7 @@ def load_liquidity_rule(path: Path | None = None) -> TradingRule:
 
 
 class LiveLiquidityRunner:
-    """Run LQDTY liquidity strategy on Delta live account."""
+    """Run LQDTY using India-live market data; place orders on the trade account (demo/live)."""
 
     def __init__(
         self,
@@ -134,12 +137,19 @@ class LiveLiquidityRunner:
         state_path: Path | None = None,
         symbol: str | None = None,
         base_url: str | None = None,
+        data_base_url: str | None = None,
     ) -> None:
         ensure_data_dirs()
         self.trading = trading_client or DeltaTradingClient(base_url=base_url)
         self.base_url = self.trading.base_url
         self.symbol = symbol or self.trading.symbol
-        self.data = data_client or DeltaExchangeClient(base_url=self.base_url)
+        resolved_data_url = (
+            data_base_url
+            or get_env("DELTA_DATA_BASE_URL", INDIA_LIVE_DATA_URL)
+            or INDIA_LIVE_DATA_URL
+        )
+        self.data_base_url = resolved_data_url.rstrip("/")
+        self.data = data_client or DeltaExchangeClient(base_url=self.data_base_url)
         self.rule = rule or load_liquidity_rule(rules_path)
         self.state_path = state_path or LIVE_STATE_DIR / f"{self.symbol}_live_state.json"
         self.state = self._load_state()
@@ -913,7 +923,8 @@ class LiveLiquidityRunner:
 
         try:
             daily_rows, intraday_rows = self._fetch_market_data()
-            mark_price = self.trading.get_mark_price(self.symbol)
+            # Strategy decisions follow India-live mark; fills execute on trade account.
+            mark_price = self.data.fetch_mark_price(self.symbol)
             # Delta daily candles are labelled by their UTC calendar day.
             day = datetime.now(timezone.utc).date().isoformat()
             self._reset_session_if_new_day(day)

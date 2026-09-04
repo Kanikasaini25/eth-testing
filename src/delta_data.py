@@ -144,6 +144,22 @@ class DeltaExchangeClient:
 
         return rows
 
+    def fetch_mark_price(self, symbol: str) -> float:
+        """Public ticker mark price (no auth). Used for India-live signal following."""
+        response = self.http_client.get(
+            f"{self.base_url}/v2/tickers/{symbol}",
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("success"):
+            raise RuntimeError(f"Delta Exchange ticker error: {payload}")
+        result = payload.get("result") or {}
+        mark_price = result.get("mark_price") or result.get("spot_price")
+        if mark_price is None:
+            raise RuntimeError(f"Could not fetch mark price for {symbol} from {self.base_url}")
+        return float(mark_price)
+
 
 def save_ohlcv(rows: list[dict], path: str) -> None:
     if not rows:

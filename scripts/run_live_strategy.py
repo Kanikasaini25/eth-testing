@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run LQDTY live strategy on Delta live account."""
+"""Run LQDTY: India-live market data → demo/trade-account orders."""
 
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ def main() -> int:
     args = parser.parse_args()
 
     runner = LiveLiquidityRunner()
+    print(f"Data (signals): {runner.data_base_url}")
+    print(f"Trade (orders): {runner.base_url}")
     if args.enable:
         runner.set_enabled(True)
 

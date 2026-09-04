@@ -454,11 +454,11 @@ def render_live_account(symbol: str, base_url: str) -> None:
 
 
 def render_live_strategy(symbol: str, base_url: str) -> None:
-    st.subheader("LQDTY Live Strategy → Live Account")
-    env_label = "Production"
+    st.subheader("LQDTY Live Strategy → Demo Account")
     st.caption(
-        f"Runs the same liquidity strategy as backtest on **{env_label}**. "
-        f"100 lots entry · 80 partial @ +15 pts · 20 runner with 3 pt trail."
+        "Signals & mark from **India live** market data; orders execute on your "
+        f"**trade account** (`DELTA_BASE_URL`). Sidebar exchange is for backtest only. "
+        "100 lots entry · profit milestones from rules."
     )
 
     rules_path = default_rules_path()
@@ -466,7 +466,10 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
         st.warning("Run a backtest first to generate strategy rules, or add rules JSON manually.")
         return
 
-    runner = LiveLiquidityRunner(symbol=symbol, base_url=base_url)
+    # Ignore sidebar base_url for trading — always use .env trade + India-live data split.
+    _ = base_url
+    runner = LiveLiquidityRunner(symbol=symbol)
+    st.caption(f"Data: `{runner.data_base_url}` · Trade: `{runner.base_url}`")
     state = runner.state
 
     enabled = st.toggle(

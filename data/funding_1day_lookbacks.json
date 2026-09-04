@@ -1,0 +1,796 @@
+{
+  "symbol": "ETHUSD",
+  "gst_pct": 18.0,
+  "hold_hours": 24,
+  "end_ist": "2026-08-29 23:30:00 IST",
+  "results": [
+    {
+      "days": 7,
+      "from_ist": "2026-08-22 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 169,
+      "trades": 2,
+      "wins": 0,
+      "losses": 2,
+      "win_rate_pct": 0.0,
+      "net_pnl": -1.29,
+      "net_points": 0.0,
+      "funding": 6.91,
+      "fees_ex_gst": 6.94,
+      "gst": 1.25,
+      "fees_incl_gst": 8.19,
+      "profit_factor": 0.0,
+      "max_drawdown": 1.29,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9998.71,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 2
+      },
+      "sides": {
+        "reverse": 2
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-27 18:30:00 IST",
+          "exit_ist": "2026-08-28 18:30:00 IST",
+          "funding": 3.28,
+          "fees": 4.13,
+          "net": -0.85,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-28 20:30:00 IST",
+          "exit_ist": "2026-08-29 20:30:00 IST",
+          "funding": 3.62,
+          "fees": 4.06,
+          "net": -0.44,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": -0.44,
+      "worst": -0.85
+    },
+    {
+      "days": 14,
+      "from_ist": "2026-08-15 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 337,
+      "trades": 4,
+      "wins": 0,
+      "losses": 4,
+      "win_rate_pct": 0.0,
+      "net_pnl": -1.93,
+      "net_points": 0.0,
+      "funding": 12.52,
+      "fees_ex_gst": 12.24,
+      "gst": 2.2,
+      "fees_incl_gst": 14.44,
+      "profit_factor": 0.0,
+      "max_drawdown": 1.93,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9998.07,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 4
+      },
+      "sides": {
+        "reverse": 4
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-16 04:30:00 IST",
+          "exit_ist": "2026-08-17 04:30:00 IST",
+          "funding": 2.86,
+          "fees": 3.1,
+          "net": -0.25,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-18 06:30:00 IST",
+          "exit_ist": "2026-08-19 06:30:00 IST",
+          "funding": 2.75,
+          "fees": 3.15,
+          "net": -0.4,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-27 18:30:00 IST",
+          "exit_ist": "2026-08-28 18:30:00 IST",
+          "funding": 3.28,
+          "fees": 4.13,
+          "net": -0.85,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-28 20:30:00 IST",
+          "exit_ist": "2026-08-29 20:30:00 IST",
+          "funding": 3.62,
+          "fees": 4.06,
+          "net": -0.44,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": -0.25,
+      "worst": -0.85
+    },
+    {
+      "days": 30,
+      "from_ist": "2026-07-30 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 721,
+      "trades": 13,
+      "wins": 0,
+      "losses": 13,
+      "win_rate_pct": 0.0,
+      "net_pnl": -7.02,
+      "net_points": 0.0,
+      "funding": 35.47,
+      "fees_ex_gst": 36.0,
+      "gst": 6.48,
+      "fees_incl_gst": 42.48,
+      "profit_factor": 0.0,
+      "max_drawdown": 7.02,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9992.98,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 13
+      },
+      "sides": {
+        "reverse": 13
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-31 13:30:00 IST",
+          "exit_ist": "2026-08-01 13:30:00 IST",
+          "funding": 2.54,
+          "fees": 3.1,
+          "net": -0.56,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-02 16:30:00 IST",
+          "exit_ist": "2026-08-03 16:30:00 IST",
+          "funding": 2.68,
+          "fees": 3.05,
+          "net": -0.37,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-03 17:30:00 IST",
+          "exit_ist": "2026-08-04 17:30:00 IST",
+          "funding": 2.18,
+          "fees": 3.07,
+          "net": -0.89,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-05 11:30:00 IST",
+          "exit_ist": "2026-08-06 11:30:00 IST",
+          "funding": 2.86,
+          "fees": 3.12,
+          "net": -0.26,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-06 16:30:00 IST",
+          "exit_ist": "2026-08-07 16:30:00 IST",
+          "funding": 2.73,
+          "fees": 3.16,
+          "net": -0.43,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-07 17:30:00 IST",
+          "exit_ist": "2026-08-08 17:30:00 IST",
+          "funding": 2.76,
+          "fees": 3.18,
+          "net": -0.42,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-09 13:30:00 IST",
+          "exit_ist": "2026-08-10 13:30:00 IST",
+          "funding": 2.23,
+          "fees": 3.17,
+          "net": -0.95,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-08-10 20:30:00 IST",
+          "exit_ist": "2026-08-11 20:30:00 IST",
+          "funding": 2.42,
+          "fees": 3.09,
+          "net": -0.67,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": -0.25,
+      "worst": -0.95
+    },
+    {
+      "days": 60,
+      "from_ist": "2026-06-30 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 1441,
+      "trades": 29,
+      "wins": 0,
+      "losses": 29,
+      "win_rate_pct": 0.0,
+      "net_pnl": -13.67,
+      "net_points": 0.0,
+      "funding": 77.4,
+      "fees_ex_gst": 77.18,
+      "gst": 13.89,
+      "fees_incl_gst": 91.07,
+      "profit_factor": 0.0,
+      "max_drawdown": 13.67,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9986.33,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 29
+      },
+      "sides": {
+        "reverse": 29
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-02 04:30:00 IST",
+          "exit_ist": "2026-07-03 04:30:00 IST",
+          "funding": 2.08,
+          "fees": 2.73,
+          "net": -0.66,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-03 05:30:00 IST",
+          "exit_ist": "2026-07-04 05:30:00 IST",
+          "funding": 2.34,
+          "fees": 2.85,
+          "net": -0.52,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-07 21:30:00 IST",
+          "exit_ist": "2026-07-08 21:30:00 IST",
+          "funding": 2.5,
+          "fees": 2.92,
+          "net": -0.42,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-09 17:30:00 IST",
+          "exit_ist": "2026-07-10 17:30:00 IST",
+          "funding": 2.51,
+          "fees": 2.92,
+          "net": -0.41,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-11 23:30:00 IST",
+          "exit_ist": "2026-07-12 23:30:00 IST",
+          "funding": 2.46,
+          "fees": 3.01,
+          "net": -0.55,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-13 06:30:00 IST",
+          "exit_ist": "2026-07-14 06:30:00 IST",
+          "funding": 2.67,
+          "fees": 2.97,
+          "net": -0.3,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-15 00:30:00 IST",
+          "exit_ist": "2026-07-16 00:30:00 IST",
+          "funding": 2.78,
+          "fees": 3.14,
+          "net": -0.36,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-07-16 14:30:00 IST",
+          "exit_ist": "2026-07-17 14:30:00 IST",
+          "funding": 2.48,
+          "fees": 3.07,
+          "net": -0.59,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": -0.0,
+      "worst": -0.95
+    },
+    {
+      "days": 90,
+      "from_ist": "2026-05-31 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 2161,
+      "trades": 50,
+      "wins": 5,
+      "losses": 45,
+      "win_rate_pct": 10.0,
+      "net_pnl": -18.56,
+      "net_points": 0.0,
+      "funding": 130.39,
+      "fees_ex_gst": 126.24,
+      "gst": 22.72,
+      "fees_incl_gst": 148.96,
+      "profit_factor": 0.0588,
+      "max_drawdown": 18.56,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9981.44,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 50
+      },
+      "sides": {
+        "reverse": 50
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-02 14:30:00 IST",
+          "exit_ist": "2026-06-03 14:30:00 IST",
+          "funding": 2.41,
+          "fees": 3.18,
+          "net": -0.77,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-03 20:30:00 IST",
+          "exit_ist": "2026-06-04 20:30:00 IST",
+          "funding": 2.52,
+          "fees": 2.98,
+          "net": -0.46,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-05 10:30:00 IST",
+          "exit_ist": "2026-06-06 10:30:00 IST",
+          "funding": 2.7,
+          "fees": 2.68,
+          "net": 0.02,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-06 15:30:00 IST",
+          "exit_ist": "2026-06-07 15:30:00 IST",
+          "funding": 2.67,
+          "fees": 2.62,
+          "net": 0.05,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-07 21:30:00 IST",
+          "exit_ist": "2026-06-08 21:30:00 IST",
+          "funding": 3.05,
+          "fees": 2.73,
+          "net": 0.32,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-08 22:30:00 IST",
+          "exit_ist": "2026-06-09 22:30:00 IST",
+          "funding": 2.94,
+          "fees": 2.75,
+          "net": 0.19,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-09 23:30:00 IST",
+          "exit_ist": "2026-06-10 23:30:00 IST",
+          "funding": 2.48,
+          "fees": 2.71,
+          "net": -0.23,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-06-11 00:30:00 IST",
+          "exit_ist": "2026-06-12 00:30:00 IST",
+          "funding": 2.45,
+          "fees": 2.73,
+          "net": -0.29,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": 0.58,
+      "worst": -0.95
+    },
+    {
+      "days": 180,
+      "from_ist": "2026-03-02 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 4321,
+      "trades": 87,
+      "wins": 11,
+      "losses": 76,
+      "win_rate_pct": 12.6,
+      "net_pnl": -36.6,
+      "net_points": 0.0,
+      "funding": 248.05,
+      "fees_ex_gst": 241.23,
+      "gst": 43.42,
+      "fees_incl_gst": 284.65,
+      "profit_factor": 0.0789,
+      "max_drawdown": 36.6,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9963.4,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 87
+      },
+      "sides": {
+        "reverse": 87
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-03-06 19:30:00 IST",
+          "exit_ist": "2026-03-07 19:30:00 IST",
+          "funding": 2.3,
+          "fees": 3.28,
+          "net": -0.98,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-03-08 07:30:00 IST",
+          "exit_ist": "2026-03-09 07:30:00 IST",
+          "funding": 2.09,
+          "fees": 3.22,
+          "net": -1.13,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-03-27 15:30:00 IST",
+          "exit_ist": "2026-03-28 15:30:00 IST",
+          "funding": 2.27,
+          "fees": 3.29,
+          "net": -1.03,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-04-02 22:30:00 IST",
+          "exit_ist": "2026-04-03 22:30:00 IST",
+          "funding": 1.84,
+          "fees": 3.38,
+          "net": -1.54,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-04-11 08:30:00 IST",
+          "exit_ist": "2026-04-12 08:30:00 IST",
+          "funding": 2.48,
+          "fees": 3.68,
+          "net": -1.2,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-04-12 22:30:00 IST",
+          "exit_ist": "2026-04-13 22:30:00 IST",
+          "funding": 1.78,
+          "fees": 3.64,
+          "net": -1.86,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-04-17 11:30:00 IST",
+          "exit_ist": "2026-04-18 11:30:00 IST",
+          "funding": 3.5,
+          "fees": 3.91,
+          "net": -0.41,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-04-18 13:30:00 IST",
+          "exit_ist": "2026-04-19 13:30:00 IST",
+          "funding": 4.27,
+          "fees": 3.88,
+          "net": 0.39,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": 0.58,
+      "worst": -1.86
+    },
+    {
+      "days": 250,
+      "from_ist": "2025-12-22 23:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 6001,
+      "trades": 101,
+      "wins": 11,
+      "losses": 90,
+      "win_rate_pct": 10.9,
+      "net_pnl": -53.05,
+      "net_points": 0.0,
+      "funding": 282.32,
+      "fees_ex_gst": 284.24,
+      "gst": 51.16,
+      "fees_incl_gst": 335.4,
+      "profit_factor": 0.0558,
+      "max_drawdown": 53.05,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9946.95,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 101
+      },
+      "sides": {
+        "reverse": 101
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-26 00:30:00 IST",
+          "exit_ist": "2026-01-27 00:30:00 IST",
+          "funding": 1.93,
+          "fees": 4.74,
+          "net": -2.8,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-30 12:30:00 IST",
+          "exit_ist": "2026-01-31 12:30:00 IST",
+          "funding": 3.04,
+          "fees": 4.48,
+          "net": -1.44,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-31 19:30:00 IST",
+          "exit_ist": "2026-02-01 19:30:00 IST",
+          "funding": 2.78,
+          "fees": 4.06,
+          "net": -1.28,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-01 21:30:00 IST",
+          "exit_ist": "2026-02-02 21:30:00 IST",
+          "funding": 3.39,
+          "fees": 3.85,
+          "net": -0.46,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-02 23:30:00 IST",
+          "exit_ist": "2026-02-03 23:30:00 IST",
+          "funding": 2.8,
+          "fees": 3.69,
+          "net": -0.89,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-04 05:30:00 IST",
+          "exit_ist": "2026-02-05 05:30:00 IST",
+          "funding": 2.19,
+          "fees": 3.63,
+          "net": -1.43,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-05 20:30:00 IST",
+          "exit_ist": "2026-02-06 20:30:00 IST",
+          "funding": 2.95,
+          "fees": 3.25,
+          "net": -0.31,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-09 03:30:00 IST",
+          "exit_ist": "2026-02-10 03:30:00 IST",
+          "funding": 2.13,
+          "fees": 3.49,
+          "net": -1.35,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": 0.58,
+      "worst": -2.8
+    },
+    {
+      "days": 365,
+      "from_ist": "2025-08-30 01:30:00 IST",
+      "to_ist": "2026-08-29 23:30:00 IST",
+      "bars": 8759,
+      "trades": 103,
+      "wins": 11,
+      "losses": 92,
+      "win_rate_pct": 10.7,
+      "net_pnl": -57.14,
+      "net_points": 0.0,
+      "funding": 287.75,
+      "fees_ex_gst": 292.3,
+      "gst": 52.61,
+      "fees_incl_gst": 344.91,
+      "profit_factor": 0.0521,
+      "max_drawdown": 57.14,
+      "avg_hold_hours": 24.0,
+      "ending_wallet": 9942.86,
+      "open_at_end": "",
+      "reasons": {
+        "time_exit": 103
+      },
+      "sides": {
+        "reverse": 103
+      },
+      "trades_detail": [
+        {
+          "side": "reverse",
+          "entry_ist": "2025-12-01 06:30:00 IST",
+          "exit_ist": "2025-12-02 06:30:00 IST",
+          "funding": 2.57,
+          "fees": 4.66,
+          "net": -2.09,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2025-12-17 20:30:00 IST",
+          "exit_ist": "2025-12-18 20:30:00 IST",
+          "funding": 2.85,
+          "fees": 4.85,
+          "net": -2.0,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-26 00:30:00 IST",
+          "exit_ist": "2026-01-27 00:30:00 IST",
+          "funding": 1.93,
+          "fees": 4.74,
+          "net": -2.8,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-30 12:30:00 IST",
+          "exit_ist": "2026-01-31 12:30:00 IST",
+          "funding": 3.04,
+          "fees": 4.48,
+          "net": -1.44,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-01-31 19:30:00 IST",
+          "exit_ist": "2026-02-01 19:30:00 IST",
+          "funding": 2.78,
+          "fees": 4.06,
+          "net": -1.28,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-01 21:30:00 IST",
+          "exit_ist": "2026-02-02 21:30:00 IST",
+          "funding": 3.39,
+          "fees": 3.85,
+          "net": -0.46,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-02 23:30:00 IST",
+          "exit_ist": "2026-02-03 23:30:00 IST",
+          "funding": 2.8,
+          "fees": 3.69,
+          "net": -0.89,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        },
+        {
+          "side": "reverse",
+          "entry_ist": "2026-02-04 05:30:00 IST",
+          "exit_ist": "2026-02-05 05:30:00 IST",
+          "funding": 2.19,
+          "fees": 3.63,
+          "net": -1.43,
+          "hold_hours": 24.0,
+          "reason": "time_exit"
+        }
+      ],
+      "best": 0.58,
+      "worst": -2.8
+    }
+  ]
+}

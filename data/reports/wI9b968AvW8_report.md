@@ -100,7 +100,7 @@ _Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. The backtest 
 
 | Technique | Trades | Win Rate | Strategy Return | Buy & Hold | Max Drawdown | Verdict |
 |-----------|--------|----------|-----------------|------------|--------------|---------|
-| LQDTY Liquidity Strategy | 34 | 17.65% | 2.99% | 29.25% | 0.68% | Mixed |
+| LQDTY Liquidity Strategy | 36 | 16.67% | 2.81% | 34.55% | 0.68% | Mixed |
 
 ## Backtest Mode
 
@@ -175,6 +175,8 @@ _Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. The backtest 
 | 2026-08-30 00:38 UTC | 2026-08-30 12:05 UTC | 2462.45 | 2464.4 | -1.95 | $-4.41 | stop_loss |
 | 2026-09-01 18:47 UTC | 2026-09-02 09:23 UTC | 2387.3 | 2381.7 | -5.6 | $-7.98 | stop_loss |
 | 2026-09-02 09:34 UTC | 2026-09-02 09:44 UTC | 2374.45 | 2368.0 | -6.45 | $-8.82 | stop_loss |
+| 2026-09-03 13:35 UTC | 2026-09-03 13:40 UTC | 2425.15 | 2432.35 | -7.2 | $-9.63 | stop_loss |
+| 2026-09-03 13:46 UTC | 2026-09-03 14:11 UTC | 2430.05 | 2435.5 | -5.45 | $-7.88 | stop_loss |
 
 ## Transcript Excerpt
 

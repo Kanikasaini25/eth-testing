@@ -10,9 +10,19 @@ from src.strategy import (
     setup_invalidated,
     setup_too_wide,
 )
+from src.patterns import (
+    PendingPattern,
+    build_indicator_cache,
+    confirm_pattern_entry,
+    detect_pattern,
+    pattern_config_from_params,
+    pattern_invalidated,
+)
+from src.delta_data import RESOLUTION_SECONDS
 from src.swings import (
     detect_swings,
     epoch_of,
+    last_closed_bar_open,
     last_closed_m15_open,
     latest_swing,
     usable_swings,
@@ -21,13 +31,13 @@ from src.swings import (
 
 @dataclass
 class BacktestParams:
-    target_points: float = 30.0
-    position_lots: int = 100
+    target_points: float = 40.0
+    position_lots: int = 500
     fee_pct_per_side: float = 0.05
     fee_maker_pct: float = 0.02
     maker_on_take_profit: bool = True
     maker_on_entry: bool = False
-    scalper_offer: bool = False
+    scalper_offer: bool = True
     scalper_minutes: float = 30.0
     gst_pct: float = 0.0
     starting_wallet_usd: float = 10000.0
@@ -35,21 +45,64 @@ class BacktestParams:
     swing_left: int = 2
     swing_right: int = 2
     swing_lookback: int = 48
-    confirm_timeout_minutes: int = 90
-    sl_buffer_points: float = 1.0
+    confirm_timeout_minutes: int = 120
+    sl_buffer_points: float = 0.5
     use_stop_loss: bool = True
-    max_sl_points: float = 15.0
+    max_sl_points: float = 25.0
     min_sweep_points: float = 3.0
     require_reclaim: bool = True
     require_close_back: bool = True
     grab_on_m15_close: bool = True
-    min_confirm_body: float = 1.5
+    min_confirm_body: float = 0.5
     require_close_break: bool = False
     one_shot_confirm: bool = False
-    breakeven_points: float = 0.0
-    partial_exit_pct: float = 80.0
-    runner_target_points: float = 90.0
-
+    breakeven_points: float = 15.0
+    # T1=30%, T2=40%, T3=10%, T4=10%, T5=all remaining
+    exit_scale_pcts: tuple[float, ...] = (30.0, 40.0, 10.0, 10.0)
+    partial_exit_pct: float = 30.0  # legacy alias (T1); prefer exit_scale_pcts
+    max_targets: int = 5
+    runner_target_points: float = 200.0
+    trend_lookback: int = 6
+    min_shadow_ratio: float = 2.5
+    ema_period: int = 20
+    rsi_period: int = 14
+    rsi_oversold: float = 25.0
+    rsi_overbought: float = 75.0
+    min_pattern_points: float = 2.0
+    volume_lookback: int = 10
+    volume_spike_mult: float = 1.1
+    require_volume_spike: bool = False
+    require_rsi_extreme: bool = False
+    require_ema_trend: bool = False
+    require_swing_confluence: bool = False
+    swing_confluence_points: float = 15.0
+    min_rr_ratio: float = 1.5
+    target_risk_multiple: float = 3.0
+    use_adaptive_targets: bool = True
+    require_double_confirm: bool = False
+    # Gold production overlays (regime + entry + ATR risk + session)
+    use_ema_regime: bool = True
+    ema_fast: int = 20
+    ema_slow: int = 50
+    use_adx_filter: bool = True
+    adx_period: int = 14
+    adx_min: float = 20.0
+    use_donchian_filter: bool = True
+    donchian_period: int = 20
+    use_bollinger_rsi: bool = True
+    bb_period: int = 20
+    bb_std: float = 2.0
+    use_atr_stops: bool = True
+    atr_period: int = 14
+    atr_stop_mult: float = 1.5
+    atr_target_mult: float = 2.0
+    atr_max_risk_mult: float = 2.0
+    use_session_filter: bool = True
+    session_london_start: int = 7
+    session_london_end: int = 10
+    session_overlap_start: int = 12
+    session_overlap_end: int = 16
+    min_overlay_votes: int = 2
 
 @dataclass
 class OpenPosition:
@@ -63,12 +116,17 @@ class OpenPosition:
     sweep_extreme: float
     grab_ts: str
     original_stop: float = 0.0
+    original_lots: int = 0
     breakeven_done: bool = False
     partial_taken: bool = False
+    targets_hit: int = 0
+    target_step: float = 30.0
 
     def __post_init__(self) -> None:
         if self.original_stop == 0.0:
             self.original_stop = self.stop_loss
+        if self.original_lots <= 0:
+            self.original_lots = self.lots
 
 
 @dataclass
@@ -143,6 +201,10 @@ def check_bar_exit(position: OpenPosition, row: dict) -> tuple[str, float] | Non
 MAKER_EXIT_REASONS = {"take_profit", "take_profit_80", "runner_take_profit"}
 
 
+def _is_take_profit_reason(reason: str) -> bool:
+    return reason == "take_profit" or reason.startswith("take_profit_")
+
+
 def _hold_minutes(entry_ts: str, exit_ts: str) -> float:
     return max(0.0, (epoch_of(exit_ts) - epoch_of(entry_ts)) / 60.0)
 
@@ -155,7 +217,7 @@ def _fee_parts(
     hold_minutes: float,
     params: BacktestParams,
 ) -> tuple[float, float, bool]:
-    size = lots * params.usd_per_point_per_lot
+    contract_eth = params.usd_per_point_per_lot
     taker = params.fee_pct_per_side / 100.0
     maker = params.fee_maker_pct / 100.0
     entry_rate = maker if params.maker_on_entry else taker
@@ -164,13 +226,15 @@ def _fee_parts(
     )
     if scalped:
         exit_rate = 0.0
-    elif params.maker_on_take_profit and reason in MAKER_EXIT_REASONS:
+    elif params.maker_on_take_profit and _is_take_profit_reason(reason):
         exit_rate = maker
     else:
         exit_rate = taker
     gst = 1.0 + params.gst_pct / 100.0
-    entry_fee = entry_price * entry_rate * size * gst
-    exit_fee = exit_price * exit_rate * size * gst
+    entry_notional_usd = abs(lots) * contract_eth * entry_price
+    exit_notional_usd = abs(lots) * contract_eth * exit_price
+    entry_fee = entry_notional_usd * entry_rate * gst
+    exit_fee = exit_notional_usd * exit_rate * gst
     return entry_fee, exit_fee, scalped
 
 
@@ -215,7 +279,9 @@ def _close_trade(
     params: BacktestParams,
 ) -> tuple[dict, float]:
     points = _points(position.side, position.entry_price, exit_price)
-    size = position.lots * params.usd_per_point_per_lot
+    contract_eth = params.usd_per_point_per_lot
+    notional_usd = abs(position.lots) * contract_eth * position.entry_price
+    gross_usd = points * position.lots * contract_eth
     hold = _hold_minutes(position.entry_ts, exit_ts)
     entry_fee, exit_fee, scalped = _fee_parts(
         position.entry_price,
@@ -226,9 +292,10 @@ def _close_trade(
         params,
     )
     fee = entry_fee + exit_fee
-    net = points * size - fee
+    net = gross_usd - fee
     wallet += net
     risk_points = abs(position.entry_price - position.stop_loss)
+    risk_usd = risk_points * position.lots * contract_eth
     trade = {
         "side": position.side,
         "entry_ts": position.entry_ts,
@@ -241,11 +308,11 @@ def _close_trade(
         "sweep_extreme": round(position.sweep_extreme, 4),
         "grab_ts": position.grab_ts,
         "lots": position.lots,
-        "lot_usd": round(size, 2),
-        "size_usd": round(position.entry_price * size, 2),
-        "risk_usd": round(risk_points * size, 2),
+        "lot_usd": round(notional_usd, 2),
+        "size_usd": round(notional_usd, 2),
+        "risk_usd": round(risk_usd, 2),
         "points": round(points, 4),
-        "gross_usd": round(points * size, 2),
+        "gross_usd": round(gross_usd, 2),
         "hold_minutes": round(hold, 2),
         "fee_entry_usd": round(entry_fee, 4),
         "fee_exit_usd": round(exit_fee, 4),
@@ -258,21 +325,66 @@ def _close_trade(
     return trade, wallet
 
 
-def _scale_out_lots(total: int, pct: float) -> int:
-    if pct <= 0 or pct >= 100 or total < 2:
-        return 0
-    closed = int(total * pct / 100.0)
-    return min(max(closed, 1), total - 1)
-
-
-def _runner_target_price(position: OpenPosition, runner_points: float) -> float:
-    if runner_points <= 0:
-        offset = 1_000_000.0
-    else:
-        offset = runner_points
+def _target_price_at_level(position: OpenPosition, level: int, step: float) -> float:
+    offset = step * level
     if position.side == "long":
         return position.entry_price + offset
     return position.entry_price - offset
+
+
+def _stop_after_target_level(position: OpenPosition, level: int, step: float) -> float:
+    """Trail SL after booking Tn.
+
+    T1 → mid(entry, T1)
+    T2 → T1
+    T3 → T3  (so T4 phase SL = T3)
+    T4 → T4  (so T5 phase SL = T4)
+    """
+    if level <= 0:
+        return position.stop_loss
+    if level == 1:
+        entry = position.entry_price
+        first_target = _target_price_at_level(position, 1, step)
+        return (entry + first_target) / 2.0
+    if level == 2:
+        return _target_price_at_level(position, 1, step)
+    # After T3+: SL locks at the target just hit (T4 uses T3, T5 uses T4)
+    return _target_price_at_level(position, level, step)
+
+
+def _exit_pcts(params: BacktestParams) -> tuple[float, ...]:
+    raw = getattr(params, "exit_scale_pcts", None)
+    if raw:
+        return tuple(float(x) for x in raw)
+    # Fallback: repeat legacy partial_exit_pct for early targets
+    pct = float(params.partial_exit_pct or 30.0)
+    return (pct, pct, pct, pct)
+
+
+def _lots_for_target_level(
+    original_lots: int,
+    remaining_lots: int,
+    level: int,
+    max_targets: int,
+    pcts: tuple[float, ...],
+) -> int:
+    """Close size at Tn as % of *original* lots; T_max closes all remaining."""
+    if remaining_lots <= 0:
+        return 0
+    if level >= max_targets:
+        return remaining_lots
+    idx = level - 1
+    if idx < 0 or idx >= len(pcts):
+        return remaining_lots
+    pct = pcts[idx]
+    desired = int(round(original_lots * pct / 100.0))
+    if desired < 1 and remaining_lots > 1:
+        desired = 1
+    # Keep at least 1 lot for later targets when possible
+    levels_left_after = max_targets - level
+    reserve = levels_left_after if remaining_lots > levels_left_after else 0
+    max_close = remaining_lots - reserve if reserve > 0 else remaining_lots
+    return max(0, min(desired, max_close, remaining_lots))
 
 
 def _slice_position(position: OpenPosition, lots: int) -> OpenPosition:
@@ -287,8 +399,11 @@ def _slice_position(position: OpenPosition, lots: int) -> OpenPosition:
         sweep_extreme=position.sweep_extreme,
         grab_ts=position.grab_ts,
         original_stop=position.original_stop,
+        original_lots=position.original_lots,
         breakeven_done=position.breakeven_done,
         partial_taken=position.partial_taken,
+        targets_hit=position.targets_hit,
+        target_step=position.target_step,
     )
 
 
@@ -299,37 +414,73 @@ def _manage_open(
     params: BacktestParams,
 ) -> tuple[OpenPosition | None, list[dict], float]:
     maybe_move_to_breakeven(position, bar, params.breakeven_points)
-    exit_hit = check_bar_exit(position, bar)
-    if exit_hit is None:
-        return position, [], wallet
-    reason, exit_price = exit_hit
-    closed = _scale_out_lots(position.lots, params.partial_exit_pct)
-    if reason == "take_profit" and not position.partial_taken and closed > 0:
+    fills: list[dict] = []
+    pcts = _exit_pcts(params)
+
+    while True:
+        exit_hit = check_bar_exit(position, bar)
+        if exit_hit is None:
+            return position, fills, wallet
+
+        reason, exit_price = exit_hit
+        if reason == "stop_loss":
+            label = "stop_loss" if position.targets_hit == 0 else f"stop_loss_after_T{position.targets_hit}"
+            trade, wallet = _close_trade(position, bar["timestamp"], exit_price, label, wallet, params)
+            fills.append(trade)
+            return None, fills, wallet
+
+        level = position.targets_hit + 1
+        if level >= params.max_targets:
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                exit_price,
+                f"take_profit_T{level}_final",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+
+        closed = _lots_for_target_level(
+            position.original_lots or position.lots,
+            position.lots,
+            level,
+            params.max_targets,
+            pcts,
+        )
+        if closed <= 0 or closed >= position.lots:
+            # Not enough size to partial — close all at this target
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                exit_price,
+                f"take_profit_T{level}_final",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+
         slice_pos = _slice_position(position, closed)
         trade, wallet = _close_trade(
-            slice_pos, bar["timestamp"], exit_price, "take_profit_80", wallet, params
+            slice_pos,
+            bar["timestamp"],
+            exit_price,
+            f"take_profit_T{level}",
+            wallet,
+            params,
         )
+        fills.append(trade)
         position.lots -= closed
+        position.targets_hit = level
         position.partial_taken = True
-        position.stop_loss = position.entry_price
-        position.breakeven_done = True
-        position.target = _runner_target_price(position, params.runner_target_points)
-        if position.side == "long" and float(bar["high"]) >= position.target:
-            rest_trade, wallet = _close_trade(
-                position, bar["timestamp"], position.target, "runner_take_profit", wallet, params
-            )
-            return None, [trade, rest_trade], wallet
-        if position.side == "short" and float(bar["low"]) <= position.target:
-            rest_trade, wallet = _close_trade(
-                position, bar["timestamp"], position.target, "runner_take_profit", wallet, params
-            )
-            return None, [trade, rest_trade], wallet
-        return position, [trade], wallet
-    label = reason if not position.partial_taken else f"runner_{reason}"
-    trade, wallet = _close_trade(
-        position, bar["timestamp"], exit_price, label, wallet, params
-    )
-    return None, [trade], wallet
+        step = position.target_step
+        position.stop_loss = _stop_after_target_level(position, level, step)
+        position.target = _target_price_at_level(position, level + 1, step)
+
+        if position.lots <= 0:
+            return None, fills, wallet
 
 
 def _update_runners(
@@ -353,9 +504,14 @@ def _summarize(
     starting_wallet: float,
     grab_count: int,
     swing_count: int,
+    params: BacktestParams | None = None,
 ) -> BacktestResult:
     ending = trades[-1]["wallet"] if trades else starting_wallet
-    points = sum(trade["points"] for trade in trades)
+    gross_usd = sum(float(trade.get("gross_usd", 0.0)) for trade in trades)
+    if params and params.position_lots > 0 and params.usd_per_point_per_lot > 0:
+        net_points = gross_usd / (params.position_lots * params.usd_per_point_per_lot)
+    else:
+        net_points = sum(trade["points"] for trade in trades)
     wins = [trade for trade in trades if trade["net_usd"] > 0]
     losses = [trade for trade in trades if trade["net_usd"] <= 0]
     win_gross = sum(trade["net_usd"] for trade in wins)
@@ -379,14 +535,14 @@ def _summarize(
         starting_wallet=starting_wallet,
         ending_wallet=ending,
         net_pnl=round(ending - starting_wallet, 2),
-        net_points=round(points, 4),
+        net_points=round(net_points, 4),
         win_rate=round(len(wins) / len(trades), 4) if trades else 0.0,
         profit_factor=round(profit_factor, 4) if profit_factor != float("inf") else 999.0,
         max_drawdown=round(max_dd, 2),
         trade_count=len(trades),
         wins=len(wins),
         losses=len(losses),
-        tp_count=sum(1 for trade in trades if str(trade["reason"]).startswith("take_profit")),
+        tp_count=sum(1 for trade in trades if _is_take_profit_reason(str(trade["reason"]))),
         sl_count=sum(1 for trade in trades if trade["reason"] == "stop_loss"),
         total_fees=round(sum(trade["fee_usd"] for trade in trades), 2),
         avg_win_points=round(sum(win_points) / len(win_points), 4) if win_points else 0.0,
@@ -397,6 +553,7 @@ def _summarize(
 
 
 def _open_position(signal: EntrySignal, lots: int) -> OpenPosition:
+    target_step = abs(signal.target - signal.entry_price)
     return OpenPosition(
         side=signal.side,
         entry_ts=signal.entry_ts,
@@ -407,6 +564,8 @@ def _open_position(signal: EntrySignal, lots: int) -> OpenPosition:
         swing_price=signal.swing_price,
         sweep_extreme=signal.sweep_extreme,
         grab_ts=signal.grab_ts,
+        target_step=target_step,
+        original_lots=lots,
     )
 
 
@@ -550,7 +709,7 @@ def run_liquidity_backtest(
                 leftover, last["timestamp"], float(last["close"]), reason, wallet, params
             )
             trades.append(trade)
-    result = _summarize(trades, params.starting_wallet_usd, grab_count, len(swings))
+    result = _summarize(trades, params.starting_wallet_usd, grab_count, len(swings), params)
     available = usable_swings(swings, closed_ptr, params.swing_lookback, swept_ids)
     high = latest_swing(available, "high")
     low = latest_swing(available, "low")
@@ -563,3 +722,134 @@ def run_liquidity_backtest(
         result.pending_sweep = pending.sweep_extreme
         result.pending_grab_ts = pending.grab_ts
     return result
+
+
+def _scan_new_patterns(
+    signal_rows: list[dict],
+    swings: list,
+    start_index: int,
+    end_index: int,
+    params: BacktestParams,
+    cache,
+) -> tuple[PendingPattern | None, int]:
+    cfg = pattern_config_from_params(params)
+    found: PendingPattern | None = None
+    count = 0
+    for index in range(start_index, end_index + 1):
+        if index < 0:
+            continue
+        pattern = detect_pattern(
+            signal_rows[index],
+            signal_rows,
+            index,
+            cfg=cfg,
+            swings=swings,
+            cache=cache,
+        )
+        if pattern is not None:
+            found = pattern
+            count += 1
+    return found, count
+
+
+def run_pattern_backtest(
+    signal_rows: list[dict],
+    m1_rows: list[dict],
+    params: BacktestParams | None = None,
+    *,
+    bar_seconds: int = 900,
+    entry_log: list[EntrySignal] | None = None,
+) -> BacktestResult:
+    params = params or BacktestParams()
+    cfg = pattern_config_from_params(params)
+    cache = build_indicator_cache(signal_rows, cfg)
+    swings = detect_swings(signal_rows, params.swing_left, params.swing_right)
+    pending: PendingPattern | None = None
+    position: OpenPosition | None = None
+    runners: list[OpenPosition] = []
+    trades: list[dict] = []
+    wallet = params.starting_wallet_usd
+    pattern_count = 0
+    lots = params.position_lots
+    signal_epochs = [epoch_of(row["timestamp"]) for row in signal_rows]
+    closed_ptr = -1
+
+    for bar in m1_rows:
+        now = epoch_of(bar["timestamp"])
+        prev_closed = closed_ptr
+        closed_open = last_closed_bar_open(now, bar_seconds)
+        while closed_ptr + 1 < len(signal_epochs) and signal_epochs[closed_ptr + 1] <= closed_open:
+            closed_ptr += 1
+
+        runners, runner_fills, wallet = _update_runners(runners, bar, wallet, params)
+        trades.extend(runner_fills)
+
+        if closed_ptr > prev_closed and position is None and pending is None and not runners:
+            found, added = _scan_new_patterns(
+                signal_rows, swings, prev_closed + 1, closed_ptr, params, cache
+            )
+            pattern_count += added
+            if found is not None:
+                found.pattern_epoch = signal_epochs[closed_ptr] + bar_seconds
+                pending = found
+
+        if position is not None:
+            position, fills, wallet = _manage_open(position, bar, wallet, params)
+            trades.extend(fills)
+            if position is not None and position.partial_taken:
+                runners.append(position)
+                position = None
+            continue
+
+        if pending is None:
+            continue
+        if now < pending.pattern_epoch:
+            continue
+
+        age_minutes = (now - pending.pattern_epoch) / 60.0
+        if age_minutes > params.confirm_timeout_minutes:
+            pending = None
+            continue
+        if pattern_invalidated(pending, bar):
+            pending = None
+            continue
+
+        signal = confirm_pattern_entry(pending, bar, cfg=cfg)
+        if signal is None:
+            continue
+        if entry_log is not None:
+            entry_log.append(signal)
+        position = _open_position(signal, lots)
+        pending = None
+        position, fills, wallet = _manage_open(position, bar, wallet, params)
+        trades.extend(fills)
+        if position is not None and position.partial_taken:
+            runners.append(position)
+            position = None
+
+    last = m1_rows[-1] if m1_rows else None
+    open_left = ([position] if position is not None else []) + runners
+    if last is not None:
+        for leftover in open_left:
+            reason = "end_of_data" if not leftover.partial_taken else "runner_end_of_data"
+            trade, wallet = _close_trade(
+                leftover, last["timestamp"], float(last["close"]), reason, wallet, params
+            )
+            trades.append(trade)
+
+    result = _summarize(trades, params.starting_wallet_usd, pattern_count, len(swings), params)
+    result.last_close = float(last["close"]) if last is not None else 0.0
+    if pending is not None:
+        result.pending_side = pending.side
+        result.pending_swing = (
+            pending.pattern_high if pending.side == "long" else pending.pattern_low
+        )
+        result.pending_sweep = (
+            pending.pattern_low if pending.side == "long" else pending.pattern_high
+        )
+        result.pending_grab_ts = pending.pattern_ts
+    return result
+
+
+def bar_seconds_for_resolution(resolution: str) -> int:
+    return RESOLUTION_SECONDS.get(resolution, 900)

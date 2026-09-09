@@ -6,8 +6,23 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_DIR / ".env")
 LIVE_STATE_PATH = PROJECT_DIR / "data" / "live" / "liquidity_grab_state.json"
+
+# India production — all candle/backtest data must use this (never testnet).
+INDIA_LIVE_URL = "https://api.india.delta.exchange"
+
+
+def reload_env(*, override: bool = True) -> None:
+    """Load `.env` into os.environ. Use override so Streamlit picks up edits."""
+    load_dotenv(PROJECT_DIR / ".env", override=override)
+
+
+reload_env(override=False)
+
+
+def get_candle_base_url() -> str:
+    """Historical OHLCV always comes from India live production."""
+    return INDIA_LIVE_URL
 
 
 def get_env(name: str, default: str = "") -> str:

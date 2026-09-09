@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the 15m liquidity-grab strategy on your Delta India account."""
+"""Run the live strategy on your Delta India account (ETH / tokenized gold)."""
 
 from __future__ import annotations
 
@@ -15,11 +15,21 @@ from src.config import get_env
 from src.delta_trading import DeltaTradingClient, is_testnet_url
 from src.email_notify import is_email_configured, send_test_email
 from src.live import LiveGrabRunner, live_params
+from src.product_specs import fetch_product_specs, lots_for_one_usd_per_point
+from src.symbols import resolve_delta_symbol
 
 
 def parse_args() -> argparse.Namespace:
+    symbol_hint, _ = resolve_delta_symbol(get_env("DELTA_SYMBOL", "PAXGUSD"))
+    default_lots = int(
+        get_env("POSITION_LOTS")
+        or str(lots_for_one_usd_per_point(fetch_product_specs(symbol_hint), usd_per_point=1.0))
+    )
     parser = argparse.ArgumentParser(
-        description="15m liquidity grab + 1m confirmation on Delta ETHUSD"
+        description=(
+            "Live runner on Delta India. Gold = PAXGUSD/XAUTUSD "
+            "(XAUUSD is not listed; alias maps to PAXGUSD)."
+        )
     )
     parser.add_argument(
         "--live",
@@ -36,9 +46,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--symbol",
         default=get_env("DELTA_SYMBOL", "ETHUSD"),
-        help="Futures symbol (default ETHUSD)",
+        help="Futures symbol: ETHUSD, PAXGUSD, XAUTUSD (XAUUSD → PAXGUSD)",
     )
-    parser.add_argument("--lots", type=int, default=100, help="Entry size in lots")
+    parser.add_argument(
+        "--lots",
+        type=int,
+        default=default_lots,
+        help=f"Entry size in lots (default {default_lots} = ~$1 P&L per $1 move)",
+    )
     parser.add_argument(
         "--test-email",
         action="store_true",
@@ -67,28 +82,39 @@ def main() -> int:
         print(result.message)
         return 0 if result.success else 1
 
+    symbol, notice = resolve_delta_symbol(args.symbol)
+    if notice:
+        print(f"NOTE: {notice}")
+
     params = live_params(lots=int(args.lots))
-    runner = LiveGrabRunner(params=params, symbol=args.symbol.upper())
+    runner = LiveGrabRunner(params=params, symbol=symbol)
     dry_run = not args.live
 
     if args.live and not runner.broker.is_configured:
         print("Missing DELTA_API_KEY / DELTA_API_SECRET in .env")
         return 1
 
+    if args.live and is_testnet_url(get_env("DELTA_BASE_URL", "")):
+        print(
+            "WARNING: DELTA_BASE_URL is testnet. Candles always use India LIVE; "
+            "orders go to testnet. For real gold trading set "
+            "DELTA_BASE_URL=https://api.india.delta.exchange"
+        )
+
     print(
-        "15m liquidity grab live runner · "
-        f"{'DRY-RUN (no orders)' if dry_run else 'LIVE ORDERS'} · {args.symbol}"
+        "Hammer / Shooting Star live runner · "
+        f"{'DRY-RUN (no orders)' if dry_run else 'LIVE ORDERS'} · {symbol}"
     )
     print(
-        f"Rules: 100 lots default, 80% off at +{params.target_points:.0f}, "
-        f"20% runner +{params.runner_target_points:.0f}, stop at grab extreme"
+        f"Rules: hammer/shooting star + 1m confirm only · {args.lots} lots · "
+        f"T1 +{params.target_points:.0f}"
     )
     if is_email_configured():
         print("Email alerts: on (NOTIFY_EMAIL)")
     else:
         print("Email alerts: off (set SMTP_* and NOTIFY_EMAIL in .env)")
     if not dry_run:
-        print_account(args.symbol.upper())
+        print_account(symbol)
         print("This places real futures orders. Ctrl+C to stop.")
 
     def run_tick() -> None:

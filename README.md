@@ -1,17 +1,28 @@
-# 15m Liquidity Grab + 1m Confirmation
+# 15m Liquidity Grab + Hammer/Shooting Star
 
-Backtests a 15-minute liquidity sweep with 1-minute two-candle reversal confirmation on **India Delta ETHUSD futures**. Candles are fetched live from `https://api.india.delta.exchange` on every run (no cache).
+Backtests and live-scans strategies on **India Delta LIVE** candles (`https://api.india.delta.exchange` — never testnet/demo history).
 
-## Strategy
+## Gold / XAUUSD — which broker?
 
-1. Mark 15-minute swing highs and lows (fractal, 2 bars left/right).
-2. Wait for a liquidity grab on a **closed 15-minute bar**:
-   - Downside: wick at least 3 points below a swing low and close back above it.
-   - Upside: wick at least 3 points above a swing high and close back below it.
-3. Confirm on the 1-minute chart: two consecutive reversal candles with a real body. Enter when the second breaks the first.
-4. Size **100 lots**. Take **80 lots** off at +30 points. Move the remaining **20 lots** to breakeven and target +90.
+| Want | Use | Notes |
+|------|-----|--------|
+| Gold on **Delta India** | `PAXGUSD` (or `XAUTUSD`) | Tokenized gold perpetual. Classic **XAUUSD is not listed** on Delta. |
+| Classic **XAUUSD** CFD | **MT5 / PDMBulls** | `scripts/run_mt5_local.py` or `mql5/` EA |
+| India exchange gold | **Angel One MCX** (e.g. GOLDM) | Not XAUUSD; would need a new SmartAPI integration |
 
-Stop sits 1 point beyond the grab extreme, capped at 15 points.
+If you pass `--symbol XAUUSD` to the Delta scripts, it is aliased to **PAXGUSD**.
+
+## Strategy (Streamlit / pattern)
+
+**Hammer / Shooting Star entry** plus gold production overlays (all **USD**, India LIVE candles):
+
+1. **Trend regime** — EMA(50) side filter, ADX ≥ 20, Donchian(20) context  
+2. **Entry** — Hammer (BUY) / Shooting Star (SELL) + 1m confirm  
+3. **Mean-reversion** — Bollinger extreme **or** RSI 25/75  
+4. **ATR risk** — stops/targets scale with ATR(14)  
+5. **Sessions (UTC)** — London 07–10 or London/NY overlap 12–16  
+
+Toggle any overlay via `.env` `USE_*` flags. Scale out at T1/T2; close at T3.
 
 ## Setup
 
@@ -24,40 +35,53 @@ cp .env.example .env
 
 Public candle history does not need API keys.
 
-## Backtest
+## Backtest (live production candles)
 
 ```bash
 streamlit run app.py
 ```
 
-Set symbol (`ETHUSD`), lookback, and fees, then click **Run backtest**.
+Select **PAXGUSD** (gold) or ETHUSD in the sidebar, set lookback, then **Run backtest**.
 
-## Live (same rules)
-
-Uses the same engine as the backtest. On each closed 1-minute bar it looks for a 15-minute grab + two-candle confirmation, then:
-
-- Market-enters 100 lots
-- Rests 80 lots as a reduce-only limit at +30 (maker)
-- Rests a reduce-only stop on the full 100 lots
-- After the 80% fill, moves the remaining 20 lots to breakeven and targets +90
-
-Put your India API key and secret in `.env`, then:
+## Live on Delta (same candle source)
 
 ```bash
-pip install -r requirements.txt
-# Scan only — no orders
-python scripts/run_live.py --loop
+# Scan only — no orders (gold)
+python scripts/run_live.py --loop --symbol PAXGUSD
 
-# Real orders on your Delta account
-python scripts/run_live.py --live --loop
+# Real orders (needs live India keys in .env, not testnet)
+python scripts/run_live.py --live --loop --symbol PAXGUSD --lots 100
 ```
 
-Alerts go to every address in `NOTIFY_EMAIL` (comma-separated) on buy/sell signals, live fills, 80% take-profits, and position closes.
+Set `DELTA_BASE_URL=https://api.india.delta.exchange` and production API keys for real orders. Candles are always India LIVE regardless of `DELTA_BASE_URL`.
+
+Alerts go to every address in `NOTIFY_EMAIL` (comma-separated).
 
 ```bash
 python scripts/run_live.py --test-email
 ```
 
-Create the API key on Delta with **trading** enabled. Start with `--loop` (dry-run) and confirm signals match the Streamlit backtest before using `--live`.
+## Local MT5 / PDMBulls (true XAUUSD)
 
-For research and at your own risk. Past performance does not guarantee future results. Futures can lose more than your margin.
+Trade Hammer / Shooting Star on your **PDMBulls** account from this laptop.
+
+1. Install **MetaTrader 5** from PDMBulls and log in.
+2. Keep the MT5 terminal **open and connected**.
+3. On **Windows** (`MetaTrader5` package is Windows-only):
+
+```bash
+pip install MetaTrader5
+```
+
+4. Put credentials in `.env` with `MT5_SYMBOL=XAUUSD`.
+5. Run:
+
+```bash
+python scripts/run_mt5_local.py --check
+python scripts/run_mt5_local.py --loop              # dry-run
+python scripts/run_mt5_local.py --live --loop       # place orders
+```
+
+On Linux, use the MQL5 EA in `mql5/` instead (see `mql5/README.md`).
+
+For research and at your own risk. Past performance does not guarantee future results.

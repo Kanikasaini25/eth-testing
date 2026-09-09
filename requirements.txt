@@ -2,3 +2,5 @@ python-dotenv==1.1.0
 requests==2.32.3
 streamlit==1.62.0
 delta-rest-client==1.0.14
+# MetaTrader5 is Windows-only and needed for scripts/run_mt5_local.py
+# MetaTrader5>=5.0.45

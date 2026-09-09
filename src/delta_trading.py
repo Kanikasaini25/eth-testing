@@ -5,10 +5,11 @@ from typing import Any
 
 from delta_rest_client import DeltaRestClient, OrderType
 
-from src.config import get_env
+from src.config import get_env, INDIA_LIVE_URL
+from src.symbols import resolve_delta_symbol
 
 TESTNET_INDIA_URL = "https://cdn-ind.testnet.deltaex.org"
-PRODUCTION_INDIA_URL = "https://api.india.delta.exchange"
+PRODUCTION_INDIA_URL = INDIA_LIVE_URL
 
 
 @dataclass
@@ -38,7 +39,8 @@ class DeltaTradingClient:
         self.base_url = (
             base_url or get_env("DELTA_BASE_URL", PRODUCTION_INDIA_URL)
         ).rstrip("/")
-        self.symbol = symbol or get_env("DELTA_SYMBOL", "ETHUSD")
+        requested = symbol or get_env("DELTA_SYMBOL", "ETHUSD")
+        self.symbol, _notice = resolve_delta_symbol(requested)
         self._client: DeltaRestClient | None = None
         self._product_cache: dict[str, dict[str, Any]] = {}
 

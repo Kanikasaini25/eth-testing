@@ -4,41 +4,60 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
-from src.backtest import BacktestParams, BacktestResult, run_liquidity_backtest
-from src.config import LIVE_STATE_PATH
+from src.backtest import (
+    BacktestParams,
+    BacktestResult,
+    bar_seconds_for_resolution,
+    run_pattern_backtest,
+)
+from src.config import LIVE_STATE_PATH, get_candle_base_url, get_env
 from src.delta_data import DeltaExchangeClient, closed_ohlcv
 from src.delta_trading import DeltaTradingClient
 from src.email_notify import notify_event
+from src.product_specs import backtest_params_from_env
 from src.strategy import EntrySignal
+from src.symbols import resolve_delta_symbol
 
-CANDLE_API_URL = "https://api.india.delta.exchange"
-M15_DAYS = 5
+CANDLE_API_URL = get_candle_base_url()
+SIGNAL_DAYS = 5
 M1_DAYS = 3
 
 
 def live_params(lots: int = 100) -> BacktestParams:
-    """Same defaults as the Streamlit backtest sidebar."""
-    return BacktestParams(position_lots=lots, scalper_offer=True)
+    """Hammer / Shooting Star params (same as Streamlit)."""
+    params = backtest_params_from_env(get_env("DELTA_SYMBOL", "PAXGUSD"))
+    params.position_lots = max(int(lots), 1)
+    return params
 
 
 def signal_on_last_bar(
-    m15_rows: list[dict],
+    signal_rows: list[dict],
     m1_rows: list[dict],
     params: BacktestParams,
+    *,
+    bar_seconds: int = 900,
 ) -> EntrySignal | None:
-    signal, _result, _ts = scan_closed_bars(m15_rows, m1_rows, params)
+    signal, _result, _ts = scan_closed_bars(signal_rows, m1_rows, params, bar_seconds=bar_seconds)
     return signal
 
 
 def scan_closed_bars(
-    m15_rows: list[dict],
+    signal_rows: list[dict],
     m1_rows: list[dict],
     params: BacktestParams,
+    *,
+    bar_seconds: int = 900,
 ) -> tuple[EntrySignal | None, BacktestResult | None, str]:
     if not m1_rows:
         return None, None, "no closed 1m candles"
     entries: list[EntrySignal] = []
-    result = run_liquidity_backtest(m15_rows, m1_rows, params, entry_log=entries)
+    result = run_pattern_backtest(
+        signal_rows,
+        m1_rows,
+        params,
+        bar_seconds=bar_seconds,
+        entry_log=entries,
+    )
     last_ts = m1_rows[-1]["timestamp"]
     signal = entries[-1] if entries and entries[-1].entry_ts == last_ts else None
     return signal, result, last_ts
@@ -51,17 +70,15 @@ def _utc_now() -> str:
 def _status_log(last_ts: str, result: BacktestResult | None) -> str:
     if result is None:
         return f"{_utc_now()} | last 1m {last_ts} | no data"
-    grab = "no grab"
+    pending = "no pattern"
     if result.pending_side:
-        level = "low" if result.pending_side == "long" else "high"
-        wick = "lower" if result.pending_side == "long" else "upper"
-        grab = (
-            f"GRAB {result.pending_side} | marked swing {level} {result.pending_swing:.2f} | "
-            f"wick {wick} {result.pending_sweep:.2f} @ {result.pending_grab_ts}"
+        kind = "HAMMER" if result.pending_side == "long" else "SHOOTING STAR"
+        pending = (
+            f"{kind} pending | level {result.pending_swing:.2f} | "
+            f"SL {result.pending_sweep:.2f} @ {result.pending_grab_ts}"
         )
     return (
-        f"{_utc_now()} | last 1m {last_ts} close {result.last_close:.2f} | "
-        f"marked high {result.marked_high:.2f} | marked low {result.marked_low:.2f} | {grab}"
+        f"{_utc_now()} | last 1m {last_ts} close {result.last_close:.2f} | {pending}"
     )
 
 
@@ -80,22 +97,19 @@ def _order_log_lines(
 ) -> list[str]:
     stop = signal.stop_loss if stop is None else stop
     target = signal.target if target is None else target
-    swing_name = "swing low (marked)" if signal.side == "long" else "swing high (marked)"
-    wick_name = "grab wick lower" if signal.side == "long" else "grab wick upper"
+    pattern = "Hammer high" if signal.side == "long" else "Shooting Star low"
     lines = [
         f"{_utc_now()} | {mode} ORDER {trade} {lots} lots",
         f"  Order time:         {signal.entry_ts}",
-        f"  Grab time:          {signal.grab_ts}",
-        f"  {swing_name}: {signal.swing_price:.2f}",
-        f"  {wick_name}:   {signal.sweep_extreme:.2f}",
-        f"  1m confirm high/low: {signal.first_high:.2f} / {signal.first_low:.2f}",
+        f"  Pattern time:       {signal.grab_ts}",
+        f"  {pattern}:          {signal.swing_price:.2f}",
+        f"  Stop:               {stop:.2f}",
         f"  Signal entry:       {signal.entry_price:.2f}",
     ]
     if fill is not None:
         lines.append(f"  Fill price:         {fill:.2f}")
     lines.extend(
         [
-            f"  Stop:               {stop:.2f}",
             f"  TP 80% ({tp_lots or lots} lots): {target:.2f}",
             f"  Runner {runner} lots:    {runner_tp:.2f}",
         ]
@@ -164,23 +178,34 @@ def _can_enter(exchange_size: int, side: str, full_lots: int) -> bool:
 
 
 class LiveGrabRunner:
+    """Live Hammer / Shooting Star runner on Delta India."""
+
     def __init__(self, params: BacktestParams | None = None, symbol: str = "ETHUSD") -> None:
-        self.params = params or BacktestParams()
-        self.symbol = symbol
+        self.params = params or live_params()
+        resolved, _notice = resolve_delta_symbol(symbol)
+        self.symbol = resolved
+        self.candle_resolution = (get_env("DELTA_RESOLUTION", "15m") or "15m").strip()
+        if self.candle_resolution in {"1d", "1w"}:
+            self.candle_resolution = "15m"
+        self.bar_seconds = bar_seconds_for_resolution(self.candle_resolution)
         self.candles = DeltaExchangeClient(base_url=CANDLE_API_URL)
-        self.broker = DeltaTradingClient(symbol=symbol)
+        self.broker = DeltaTradingClient(symbol=resolved)
         self.state = load_state()
 
     def latest_signal(self) -> tuple[EntrySignal | None, str, BacktestResult | None]:
-        m15 = closed_ohlcv(
-            self.candles.fetch_historical_ohlcv(self.symbol, "15m", days=M15_DAYS),
-            "15m",
+        signal_rows = closed_ohlcv(
+            self.candles.fetch_historical_ohlcv(
+                self.symbol, self.candle_resolution, days=SIGNAL_DAYS
+            ),
+            self.candle_resolution,
         )
         m1 = closed_ohlcv(
             self.candles.fetch_historical_ohlcv(self.symbol, "1m", days=M1_DAYS),
             "1m",
         )
-        signal, result, last_ts = scan_closed_bars(m15, m1, self.params)
+        signal, result, last_ts = scan_closed_bars(
+            signal_rows, m1, self.params, bar_seconds=self.bar_seconds
+        )
         return signal, last_ts, result
 
     def _place_exits(self, lots: int, stop: float, target: float, side: str) -> None:
@@ -212,7 +237,7 @@ class LiveGrabRunner:
             runner_tp=runner_tp,
         )
         mail_lines = [
-            "15m liquidity grab — entry signal",
+            "Hammer / Shooting Star — entry signal",
             "",
             *actions,
         ]
@@ -268,7 +293,7 @@ class LiveGrabRunner:
             target=target,
         )
         mail_lines = [
-            "15m liquidity grab — live order filled",
+            "Hammer / Shooting Star — live order filled",
             "",
             *actions,
             "",
@@ -296,7 +321,7 @@ class LiveGrabRunner:
             mail = _notify(
                 f"[LIVE] {kind} {self.symbol} {side_label}",
                 [
-                    "15m liquidity grab — position closed",
+                    "Hammer / Shooting Star — position closed",
                     "",
                     f"Symbol:  {self.symbol}",
                     f"Side:    {side_label}",
@@ -328,7 +353,7 @@ class LiveGrabRunner:
             mail = _notify(
                 f"[LIVE] 80% TP {self.symbol} {trade} @ {self.state.target:.2f}",
                 [
-                    "15m liquidity grab — 80% take-profit filled",
+                    "Hammer / Shooting Star — 80% take-profit filled",
                     "",
                     f"Symbol:     {self.symbol}",
                     f"Side:       {trade}",

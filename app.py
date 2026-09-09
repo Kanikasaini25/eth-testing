@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -9,128 +10,171 @@ if str(PROJECT_DIR) not in sys.path:
 
 import streamlit as st
 
-from src.backtest import BacktestParams, run_liquidity_backtest
-from src.config import get_env
+from src.backtest import BacktestParams, bar_seconds_for_resolution, run_pattern_backtest
+from src.config import get_candle_base_url, get_env, reload_env
 from src.delta_data import DeltaExchangeClient
+from src.product_specs import backtest_params_from_env, lots_for_one_usd_per_point, fetch_product_specs
+from src.symbols import DELTA_TRADEABLE, resolve_delta_symbol
 
-CANDLE_API_URL = "https://api.india.delta.exchange"
+# Streamlit keeps one process alive — re-read .env every script run.
+reload_env(override=True)
+CANDLE_API_URL = get_candle_base_url()
 WARMUP_DAYS = 2
 
+CANDLE_OPTIONS: dict[str, str] = {
+    "5 min": "5m",
+    "15": "15m",
+    "30": "30m",
+    "60": "1h",
+    "45": "45m",
+    "1 days": "1d",
+    "1 week": "1w",
+}
 
-def load_ohlcv(symbol: str, resolution: str, days: int, status) -> list[dict]:
+SYMBOL_LABELS: dict[str, str] = {
+    "ETHUSD": "ETHUSD (ETH perpetual)",
+    "PAXGUSD": "PAXGUSD (PAX Gold ≈ XAU)",
+    "XAUTUSD": "XAUTUSD (Tether Gold)",
+    "BTCUSD": "BTCUSD (BTC perpetual)",
+}
+
+
+def _day_bounds(start: date, end: date) -> tuple[int, int]:
+    start_ts = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    end_ts = int(
+        datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp()
+        - 1
+    )
+    return start_ts, end_ts
+
+
+def load_ohlcv(
+    symbol: str,
+    resolution: str,
+    start_date: date,
+    end_date: date,
+    status,
+) -> list[dict]:
     client = DeltaExchangeClient(base_url=CANDLE_API_URL)
+    start_ts, end_ts = _day_bounds(start_date, end_date)
 
-    def on_progress(fetched: float, total: int, res: str) -> None:
+    def on_progress(fetched: float, total: float, res: str) -> None:
         status.info(
-            f"Fetching live {res} candles from Delta India ({fetched:.1f}/{total} days, no cache)…"
+            f"Fetching live {res} candles from Delta India LIVE ({fetched:.1f}/{total:.1f} days, no cache)…"
         )
 
-    return client.fetch_historical_ohlcv(
+    return client.fetch_historical_ohlcv_range(
         symbol=symbol,
         resolution=resolution,
-        days=days,
+        start=start_ts,
+        end=end_ts,
         on_progress=on_progress,
     )
 
 
-def sidebar_params() -> tuple[str, int, BacktestParams]:
+def sidebar_params() -> tuple[str, date, date, str, BacktestParams]:
     st.sidebar.header("Backtest settings")
-    symbol = st.sidebar.text_input("Symbol", value=get_env("DELTA_SYMBOL", "ETHUSD"))
+    env_symbol, env_notice = resolve_delta_symbol(get_env("DELTA_SYMBOL", "ETHUSD"))
+    symbol_options = [s for s in DELTA_TRADEABLE if s in SYMBOL_LABELS]
+    default_idx = symbol_options.index(env_symbol) if env_symbol in symbol_options else 0
+    symbol = st.sidebar.selectbox(
+        "Symbol (Delta India LIVE)",
+        options=symbol_options,
+        index=default_idx,
+        format_func=lambda s: SYMBOL_LABELS.get(s, s),
+    )
+    st.sidebar.caption(
+        "Delta does **not** list classic XAUUSD. Gold on Delta = **PAXGUSD** (default) / **XAUTUSD** "
+        "(live production candles, not testnet). True XAUUSD CFD → MT5/PDMBulls."
+    )
+    if env_notice and env_symbol == symbol:
+        st.sidebar.info(env_notice)
     days = st.sidebar.select_slider(
         "Lookback days",
         options=[3, 7, 14, 21, 30, 45, 60, 90, 180, 200, 365],
-        value=365,
+        value=30,
     )
     st.sidebar.caption(
-        "365 = 1 year of live 1-minute candles. That download can take several minutes."
+        "Longer ranges can take several minutes to download from India Delta LIVE."
     )
-    lots = st.sidebar.number_input("Trade size (lots)", min_value=1, value=100, step=1)
-    target = st.sidebar.number_input("Take profit (points)", min_value=1.0, value=30.0, step=1.0)
-    left = st.sidebar.number_input("Swing left bars", min_value=1, value=2, step=1)
-    right = st.sidebar.number_input("Swing right bars", min_value=1, value=2, step=1)
-    lookback = st.sidebar.number_input("Swing lookback (15m bars)", min_value=5, value=48, step=1)
-    timeout = st.sidebar.number_input("Confirm timeout (minutes)", min_value=5, value=90, step=5)
-    sl_buffer = st.sidebar.number_input("Stop buffer (points)", min_value=0.0, value=1.0, step=0.5)
-    max_sl = st.sidebar.number_input("Max stop (points)", min_value=0.0, value=15.0, step=1.0)
-    min_sweep = st.sidebar.number_input("Min grab through swing (points)", min_value=0.0, value=3.0, step=0.5)
-    min_body = st.sidebar.number_input("Min 1m confirm body (points)", min_value=0.0, value=1.5, step=0.5)
-    use_sl = st.sidebar.checkbox("Use stop at liquidity-grab extreme", value=True)
-    require_reclaim = st.sidebar.checkbox("Require reclaim of the 15m swing", value=True)
-    close_back = st.sidebar.checkbox("15m must wick through and close back", value=True)
-    close_break = st.sidebar.checkbox("Second 1m must close beyond the first", value=False)
-    one_shot = st.sidebar.checkbox("Only the first two 1m candles after the grab", value=False)
-    use_partial = st.sidebar.checkbox("Scale out 80% at take profit, run 20%", value=True)
-    runner_tp = st.sidebar.number_input(
-        "Runner take profit (points, 0 = let 20% run to breakeven/stop)",
-        min_value=0.0,
-        value=90.0,
-        step=10.0,
+    start_date = st.sidebar.date_input("Select date", value=date.today() - timedelta(days=int(days)))
+    end_date = st.sidebar.date_input("End date", value=date.today())
+    candle_label = st.sidebar.selectbox(
+        "Candle option",
+        options=list(CANDLE_OPTIONS.keys()),
+        index=1,
     )
-    wallet = st.sidebar.number_input("Starting wallet (USD)", min_value=100.0, value=10000.0, step=100.0)
-    taker_fee = st.sidebar.number_input(
-        "Taker fee per side (%)", min_value=0.0, value=0.05, step=0.01, format="%.3f"
+    candle_resolution = CANDLE_OPTIONS[candle_label]
+    params = backtest_params_from_env(symbol)
+    specs = fetch_product_specs(symbol)
+    one_dollar_lots = lots_for_one_usd_per_point(specs, usd_per_point=1.0)
+    default_lots = int(params.position_lots)
+    lot_options = sorted(
+        set(
+            [
+                100,
+                250,
+                500,
+                750,
+                1000,
+                1500,
+                2000,
+                2500,
+                2800,
+                3000,
+                4000,
+                5000,
+                one_dollar_lots,
+                default_lots,
+            ]
+        )
     )
-    maker_fee = st.sidebar.number_input(
-        "Maker fee per side (%)", min_value=0.0, value=0.02, step=0.01, format="%.3f"
+    # Key includes default so changing POSITION_LOTS in .env resets the slider.
+    lots = st.sidebar.select_slider(
+        "Trade size (lots)",
+        options=lot_options,
+        value=default_lots if default_lots in lot_options else one_dollar_lots,
+        key=f"lots_{symbol}_{default_lots}",
     )
-    maker_tp = st.sidebar.checkbox("Use maker fee on take-profit limits", value=True)
-    maker_entry = st.sidebar.checkbox("Use maker fee on entries (resting limits)", value=False)
-    scalper = st.sidebar.checkbox(
-        "Delta scalper offer (0 close fee if exit ≤ 30 min)", value=True
-    )
-    apply_gst = st.sidebar.checkbox("Add 18% GST on fees", value=False)
+    usd_per_point = lots * params.usd_per_point_per_lot
     st.sidebar.caption(
-        "Delta India ETHUSD: taker 0.05%, maker 0.02%. "
-        "Join the Scalper Offer on the ETHUSD page first — it waives the closing "
-        "fee when a fill (including the 80% scale-out) closes within 30 minutes. "
-        "Break entries are taker in live trading; maker-on-entry is optimistic. "
-        "India GST is 18% on the fee itself."
+        f"**${usd_per_point:.2f} USD profit per $1 price move** · "
+        f"{one_dollar_lots} lots = **$1 / $1** on {symbol} "
+        f"(1 lot = ${params.usd_per_point_per_lot:.4f}/pt)"
     )
-    params = BacktestParams(
-        target_points=float(target),
-        position_lots=int(lots),
-        fee_pct_per_side=float(taker_fee),
-        fee_maker_pct=float(maker_fee),
-        maker_on_take_profit=bool(maker_tp),
-        maker_on_entry=bool(maker_entry),
-        scalper_offer=bool(scalper),
-        gst_pct=18.0 if apply_gst else 0.0,
-        starting_wallet_usd=float(wallet),
-        swing_left=int(left),
-        swing_right=int(right),
-        swing_lookback=int(lookback),
-        confirm_timeout_minutes=int(timeout),
-        sl_buffer_points=float(sl_buffer),
-        use_stop_loss=bool(use_sl),
-        max_sl_points=float(max_sl),
-        min_sweep_points=float(min_sweep),
-        require_reclaim=bool(require_reclaim),
-        require_close_back=bool(close_back),
-        min_confirm_body=float(min_body),
-        require_close_break=bool(close_break),
-        one_shot_confirm=bool(one_shot),
-        partial_exit_pct=80.0 if use_partial else 0.0,
-        runner_target_points=float(runner_tp),
+    scale = list(params.exit_scale_pcts) if params.exit_scale_pcts else [30.0]
+    t1_pct = float(scale[0]) / 100.0
+    scale_txt = "/".join(f"{float(x):.0f}" for x in scale) + "/rest"
+    st.sidebar.caption(
+        f"T1 (+{params.target_points:.0f}) books {scale[0]:.0f}% ≈ "
+        f"${usd_per_point * params.target_points * t1_pct:.0f} USD · "
+        f"scale {scale_txt} · T4 SL=T3 · T5 SL=T4"
     )
-    return symbol.strip().upper(), int(days), params
+    params.position_lots = int(lots)
+    st.sidebar.caption(
+        f"{symbol} · USD · Hammer/Star + gold overlays "
+        f"(≥{params.min_overlay_votes}/5 overlays · max SL {params.max_sl_points:.0f} · "
+        f"R:R {params.min_rr_ratio} · BE +{params.breakeven_points:.0f})"
+    )
+    return symbol, start_date, end_date, candle_resolution, params
 
 
 def render_metrics(result) -> None:
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Net PnL (USD)", f"{result.net_pnl:,.2f}")
-    col2.metric("Net points", f"{result.net_points:,.2f}")
+    col1.metric("Net PnL (USD)", f"${result.net_pnl:,.2f}")
+    col2.metric("Gross P/L (USD)", f"${sum(float(t.get('gross_usd', 0)) for t in result.trades):,.2f}" if result.trades else "$0.00")
     col3.metric("Win rate", f"{result.win_rate * 100:.1f}%")
     col4.metric("Trades", str(result.trade_count))
     col5, col6, col7, col8 = st.columns(4)
     col5.metric("Take profits", str(result.tp_count))
     col6.metric("Stop losses", str(result.sl_count))
     col7.metric("Profit factor", f"{result.profit_factor:.2f}")
-    col8.metric("Max drawdown", f"{result.max_drawdown:,.2f}")
+    col8.metric("Max drawdown (USD)", f"${result.max_drawdown:,.2f}")
     col9, col10, col11, col12 = st.columns(4)
-    col9.metric("Total fees", f"{result.total_fees:,.2f}")
+    col9.metric("Total fees (USD)", f"${result.total_fees:,.2f}")
     col10.metric("Avg win (pts)", f"{result.avg_win_points:,.2f}")
     col11.metric("Avg loss (pts)", f"{result.avg_loss_points:,.2f}")
-    col12.metric("Liquidity grabs", str(result.grab_count))
+    col12.metric("Patterns found", str(result.grab_count))
     scalped = sum(1 for trade in result.trades if trade.get("scalper_applied"))
     if scalped:
         st.caption(
@@ -153,42 +197,49 @@ def render_equity_curve(equity: list[dict]) -> None:
         y = height - pad - ((value - low) / span) * (height - 2 * pad)
         points.append(f"{x:.1f},{y:.1f}")
     color = "#16a34a" if values[-1] >= values[0] else "#dc2626"
+    st.caption("Equity curve · wallet balance in **USD** (India Delta LIVE prices)")
     st.html(
         f'<svg viewBox="0 0 {width} {height}" width="100%" height="240" '
         f'style="background:#0e1117;border-radius:8px;">'
+        f'<text x="{pad}" y="18" fill="#9ca3af" font-size="12">USD ${high:,.2f}</text>'
+        f'<text x="{pad}" y="{height - 6}" fill="#9ca3af" font-size="12">USD ${low:,.2f}</text>'
         f'<polyline fill="none" stroke="{color}" stroke-width="2.5" '
         f'points="{" ".join(points)}" />'
-        f'<text x="{pad}" y="18" fill="#9ca3af" font-size="12">{high:,.2f}</text>'
-        f'<text x="{pad}" y="{height - 6}" fill="#9ca3af" font-size="12">{low:,.2f}</text>'
         f"</svg>"
     )
 
 
 TRADE_COLUMNS = (
     ("side", "side"),
-    ("grab_ts", "liq grab"),
+    ("grab_ts", "pattern"),
     ("entry_ts", "entry"),
     ("exit_ts", "exit"),
-    ("entry_price", "entry px"),
-    ("exit_price", "exit px"),
-    ("stop_loss", "stop"),
-    ("target", "target"),
-    ("swing_price", "swing"),
+    ("entry_price", "entry USD"),
+    ("exit_price", "exit USD"),
+    ("stop_loss", "stop USD"),
+    ("target", "target USD"),
+    ("swing_price", "pattern level USD"),
     ("lots", "lots"),
     ("points", "points"),
-    ("fee_usd", "fees"),
-    ("net_usd", "Net P/L"),
+    ("fee_usd", "fees USD"),
+    ("net_usd", "Net P/L USD"),
     ("reason", "reason"),
 )
 
 
 def _cell(value, *, column: str = "") -> str:
+    money_cols = {"fee_usd", "net_usd"}
+    price_cols = {"entry_price", "exit_price", "stop_loss", "target", "swing_price"}
     if isinstance(value, float):
-        text = f"{value:,.2f}" if column in {"fee_usd", "net_usd"} else f"{value:.2f}"
-        if column == "net_usd":
-            color = "#16a34a" if value > 0 else "#dc2626" if value < 0 else "#9ca3af"
-            return f"<span style='color:{color};font-weight:600'>{text}</span>"
-        return text
+        if column in money_cols:
+            text = f"${value:,.2f}"
+            if column == "net_usd":
+                color = "#16a34a" if value > 0 else "#dc2626" if value < 0 else "#9ca3af"
+                return f"<span style='color:{color};font-weight:600'>{text}</span>"
+            return text
+        if column in price_cols:
+            return f"${value:,.2f}"
+        return f"{value:.2f}"
     return str(value)
 
 
@@ -215,65 +266,139 @@ def render_trades(trades: list[dict]) -> None:
         f"<tfoot><tr style='border-top:2px solid #9ca3af'>{total_cells}</tr></tfoot></table></div>"
     )
     st.caption(
-        f"Fees: {total_fees:,.2f} USD · Net P/L: {total_net:+,.2f} USD. "
-        "Delta ETHUSD: 1 lot = 0.01 ETH ($0.01 per point). "
-        "80 lots at +30 pts ≈ $24; the 20-lot runner targets +90 pts."
+        f"Fees: ${total_fees:,.2f} USD · Net P/L: ${total_net:+,.2f} USD. "
+        "Delta India products are quoted, settled, and margined in **USD** (not INR). "
+        "Gold on Delta is **PAXGUSD/XAUTUSD** (not classic XAUUSD). "
+        f"Scale out T1–T5: **{get_env('EXIT_SCALE_PCTS', '20,30,20,15')} / rest**. "
+        "After T3, SL=T3 (for T4); after T4, SL=T4 (for T5)."
     )
 
 
-def render_rules() -> None:
-    with st.expander("Strategy rules"):
+def render_rules(params: BacktestParams | None = None) -> None:
+    if params is None:
+        step = float(get_env("TARGET_POINTS", "30") or "30")
+        scale = [float(x) for x in (get_env("EXIT_SCALE_PCTS", "20,30,20,15") or "20,30,20,15").split(",")[:4]]
+        while len(scale) < 4:
+            scale.append(10.0)
+        lots = int(get_env("POSITION_LOTS", "3000") or "3000")
+        votes = get_env("MIN_OVERLAY_VOTES", "3")
+        max_sl = get_env("MAX_SL_POINTS", "18")
+        rr = get_env("MIN_RR_RATIO", "2.0")
+        be = get_env("BREAKEVEN_POINTS", "18")
+    else:
+        step = float(params.target_points)
+        scale = list(params.exit_scale_pcts)[:4]
+        while len(scale) < 4:
+            scale.append(10.0)
+        lots = int(params.position_lots)
+        votes = str(params.min_overlay_votes)
+        max_sl = f"{params.max_sl_points:.0f}"
+        rr = str(params.min_rr_ratio)
+        be = f"{params.breakeven_points:.0f}"
+    s1, s2, s3, s4 = (f"{float(x):.0f}%" for x in scale[:4])
+    with st.expander("Strategy rules · gold overlays · USD take-profits", expanded=True):
         st.markdown(
-            """
-- Mark 15-minute swing highs and lows (fractal, 2 bars left/right).
-- **Downside grab:** a 15-minute candle wicks at least 3 points below a swing low and closes back above it.
-- **Upside grab:** a 15-minute candle wicks at least 3 points above a swing high and closes back below it.
-- **Entry:** two consecutive 1-minute reversal candles; enter when the second breaks the first. Size 100 lots.
-- **Exit:** take **80 lots** off at +30 points. Move the remaining **20 lots** to breakeven and let them run to +90 (or back to entry).
-- Skip if the stop would be wider than 15 points. Tiny 1-minute candles do not count.
+            f"""
+### Data & currency
+- Candles: **India Delta LIVE · PAXGUSD** · all P&L / prices in **USD**.
+- Active size: **{lots} lots** (~${lots / 1000:.1f} per $1 move).
+
+### Entry — classic Hammer / Shooting Star
+- **BUY:** strict Hammer → 1m green close above high · **SL = hammer low**
+- **SELL:** strict Shooting Star → 1m red close below low · **SL = star high**
+- Filters: ≥**{votes}/5** overlays · max SL **{max_sl}** · min R:R **{rr}** · BE +**{be}**
+
+### Take profit ladder (from entry, USD) — % of **original** size
+| Level | Price (BUY) | Book | Stop after fill |
+|-------|-------------|------|-----------------|
+| **T1** | entry + 1×step | **{s1}** | SL → mid(entry, T1) |
+| **T2** | entry + 2×step | **{s2}** | SL → T1 |
+| **T3** | entry + 3×step | **{s3}** | SL → **T3** |
+| **T4** | entry + 4×step | **{s4}** | SL → **T4** |
+| **T5** | entry + 5×step | **all remaining** | close all |
+
+So while targeting **T4**, SL is **T3**; while targeting **T5**, SL is **T4**.  
+Default step floor ≈ **{step:.0f}** USD (or ATR / risk adaptive).
             """
         )
 
 
-def run_backtest(symbol: str, days: int, params: BacktestParams):
+def run_backtest(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    candle_resolution: str,
+    params: BacktestParams,
+):
+    if start_date > end_date:
+        raise ValueError("Select date must be on or before End date.")
+
     status = st.empty()
-    fetch_days = int(days + WARMUP_DAYS)
-    m15_rows = load_ohlcv(symbol, "15m", fetch_days, status)
-    m1_rows = load_ohlcv(symbol, "1m", fetch_days, status)
-    status.info("Simulating 15-minute liquidity grabs with 1-minute confirmation…")
-    result = run_liquidity_backtest(m15_rows, m1_rows, params)
+    fetch_start = start_date - timedelta(days=WARMUP_DAYS)
+    signal_rows = load_ohlcv(symbol, candle_resolution, fetch_start, end_date, status)
+    m1_rows = load_ohlcv(symbol, "1m", fetch_start, end_date, status)
+    status.info(
+        "Simulating Hammer/Star + gold overlays (EMA/ADX/Donchian, BB+RSI, ATR, sessions)…"
+    )
+    result = run_pattern_backtest(
+        signal_rows,
+        m1_rows,
+        params,
+        bar_seconds=bar_seconds_for_resolution(candle_resolution),
+    )
     status.empty()
-    return result, m15_rows, m1_rows
+    return result, signal_rows, m1_rows, candle_resolution
 
 
 def main() -> None:
-    st.set_page_config(page_title="15m Liquidity Grab + 1m Confirmation", layout="wide")
-    st.title("15-Minute Liquidity Grab + 1-Minute Confirmation")
+    st.set_page_config(page_title="Hammer & Shooting Star Backtest", layout="wide")
+    st.title("Hammer & Shooting Star Pattern Backtest")
     st.write(
-        "Fresh India Delta ETHUSD futures candles (no cache). "
-        "A 15-minute candle must wick through a swing by at least 3 points and close back; "
-        "then two 1-minute reversal candles confirm. Scale out 80% at +30 points and let "
-        "20% run to +90 with the stop at breakeven."
+        "Data: **India Delta LIVE** · Currency: **USD only**. "
+        "Entry: **Hammer / Shooting Star** + gold overlays "
+        "(EMA/ADX/Donchian · Bollinger+RSI · ATR stops · London/NY sessions). "
+        "Gold = **PAXGUSD**."
     )
-    symbol, days, params = sidebar_params()
-    render_rules()
+    symbol, start_date, end_date, candle_resolution, params = sidebar_params()
+    render_rules(params)
+    st.sidebar.info(
+        f"Loaded from `.env`: **{params.position_lots} lots** · T={params.target_points:.0f} · "
+        f"votes≥{params.min_overlay_votes} · scale={list(params.exit_scale_pcts)} · "
+        f"maxSL={params.max_sl_points:.0f} · BE={params.breakeven_points:.0f}"
+    )
     if st.sidebar.button("Run backtest", type="primary"):
         try:
-            result, m15_rows, m1_rows = run_backtest(symbol, days, params)
+            result, signal_rows, m1_rows, used_candle = run_backtest(
+                symbol, start_date, end_date, candle_resolution, params
+            )
         except Exception as exc:
             st.error(f"Backtest failed: {exc}")
             return
         st.session_state["liq_result"] = result
-        st.session_state["liq_meta"] = (len(m15_rows), len(m1_rows), symbol, days)
+        st.session_state["liq_meta"] = (
+            len(signal_rows),
+            len(m1_rows),
+            symbol,
+            start_date,
+            end_date,
+            used_candle,
+        )
+        st.session_state["liq_params_snapshot"] = {
+            "lots": params.position_lots,
+            "target": params.target_points,
+            "votes": params.min_overlay_votes,
+            "scale": list(params.exit_scale_pcts),
+        }
 
     stored = st.session_state.get("liq_result")
     meta = st.session_state.get("liq_meta")
     if stored is None or meta is None:
         return
-    m15_count, m1_count, used_symbol, used_days = meta
+    signal_count, m1_count, used_symbol, used_start, used_end, used_candle = meta
     st.success(
-        f"Last run: {used_symbol} on live India Delta · {used_days} day(s) · "
-        f"{m15_count} 15m candles · {m1_count} 1m candles · {stored.swing_count} swings"
+        f"Last run: {used_symbol} · India Delta LIVE · USD · {used_start} → {used_end} · "
+        f"{used_candle} · {signal_count} signal bars · {m1_count} 1m · "
+        f"{stored.grab_count} patterns"
     )
     render_metrics(stored)
     st.subheader("Equity curve")
@@ -282,7 +407,7 @@ def main() -> None:
     if stored.trades:
         render_trades(stored.trades)
     else:
-        st.write("No two-candle confirmation fills in this window. Try a longer lookback.")
+        st.write("No Hammer or Shooting Star confirmation fills in this window. Try a longer lookback.")
 
 
 if __name__ == "__main__":

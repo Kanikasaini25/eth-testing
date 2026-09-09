@@ -10,9 +10,13 @@ def epoch_of(timestamp: str) -> float:
     return datetime.fromisoformat(timestamp).timestamp()
 
 
+def last_closed_bar_open(now_epoch: float, bar_seconds: int) -> float:
+    current_open = now_epoch - (now_epoch % bar_seconds)
+    return current_open - bar_seconds
+
+
 def last_closed_m15_open(now_epoch: float) -> float:
-    current_open = now_epoch - (now_epoch % M15_SECONDS)
-    return current_open - M15_SECONDS
+    return last_closed_bar_open(now_epoch, M15_SECONDS)
 
 
 @dataclass(frozen=True)

@@ -653,6 +653,11 @@ def backtest_liquidity_intraday(
     entry_on_next_candle = bool(rule.parameters.get("entry_on_next_candle", True))
     require_close_beyond_signal = bool(rule.parameters.get("require_close_beyond_signal", True))
     require_liquidity_sweep = bool(rule.parameters.get("require_liquidity_sweep", False))
+    # If confirmation candle breaks signal high/low AND also takes out the signal SL
+    # wick, cancel the setup — no entry, no wait for a third candle.
+    skip_if_confirmation_hits_signal_stop = bool(
+        rule.parameters.get("skip_if_confirmation_hits_signal_stop", False)
+    )
     use_daily_trend_filter = bool(rule.parameters.get("use_daily_trend_filter", False))
     use_session_filter = bool(rule.parameters.get("use_session_filter", True))
     session_start_hour = int(
@@ -1033,56 +1038,64 @@ def backtest_liquidity_intraday(
                 short_triggered = False
                 pending_red = None
             if short_triggered:
-                if upper_entries_today >= max_entries_per_line:
+                # Confirmation also took out signal SL high → cancel setup, no entry.
+                if (
+                    skip_if_confirmation_hits_signal_stop
+                    and high >= pending_red["high"]
+                ):
+                    pending_red = None
+                    rejection_red = None
+                elif upper_entries_today >= max_entries_per_line:
                     pending_red = None
                     equity_curve.append(wallet_usd / starting_wallet)
                     continue
-                entry_price = close if require_close_beyond_signal else pending_red["low"]
-                stop_loss = pending_red["high"]
-                initial_stop_loss = stop_loss
-                risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
-                    "short", entry_price, stop_loss
-                )
-                signal = pending_red
-                if (
-                    _passes_liquidity_entry_filters(
-                        side="short",
-                        timestamp=timestamp,
-                        entry_price=entry_price,
-                        stop_loss=stop_loss,
-                        daily_rows=daily_rows,
-                        day=day,
-                        require_liquidity_sweep=False,
-                        signal_high=signal["high"],
-                        signal_low=signal["low"],
-                        signal_close=signal["close"],
-                        upper=upper,
-                        lower=lower,
-                        use_daily_trend_filter=use_daily_trend_filter,
-                        use_session_filter=use_session_filter,
-                        session_start_hour_delta=session_start_hour,
-                        session_end_hour_delta=session_end_hour,
+                else:
+                    entry_price = close if require_close_beyond_signal else pending_red["low"]
+                    stop_loss = pending_red["high"]
+                    initial_stop_loss = stop_loss
+                    risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
+                        "short", entry_price, stop_loss
                     )
-                    and target_1 > 0
-                    and entry_price > target_1
-                ):
-                    in_position = True
-                    side = "short"
-                    entry_line = "upper"
-                    entry_ts = timestamp
-                    target_stage = 0
-                    open_lots = position_lots
-                    entry_fee_remaining = _trading_fee_usd(
-                        entry_price, position_lots, fee_pct_per_side
-                    )
-                    trades_in_sequence += 1
-                    upper_entries_today += 1
-                    pending_red = None
-                    rejection_red = None
-                    entered_this_bar = True
-                    upper_rearmed = False
-                    reentry_side = ""
-                    reentry_pullback_seen = False
+                    signal = pending_red
+                    if (
+                        _passes_liquidity_entry_filters(
+                            side="short",
+                            timestamp=timestamp,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            daily_rows=daily_rows,
+                            day=day,
+                            require_liquidity_sweep=False,
+                            signal_high=signal["high"],
+                            signal_low=signal["low"],
+                            signal_close=signal["close"],
+                            upper=upper,
+                            lower=lower,
+                            use_daily_trend_filter=use_daily_trend_filter,
+                            use_session_filter=use_session_filter,
+                            session_start_hour_delta=session_start_hour,
+                            session_end_hour_delta=session_end_hour,
+                        )
+                        and target_1 > 0
+                        and entry_price > target_1
+                    ):
+                        in_position = True
+                        side = "short"
+                        entry_line = "upper"
+                        entry_ts = timestamp
+                        target_stage = 0
+                        open_lots = position_lots
+                        entry_fee_remaining = _trading_fee_usd(
+                            entry_price, position_lots, fee_pct_per_side
+                        )
+                        trades_in_sequence += 1
+                        upper_entries_today += 1
+                        pending_red = None
+                        rejection_red = None
+                        entered_this_bar = True
+                        upper_rearmed = False
+                        reentry_side = ""
+                        reentry_pullback_seen = False
         if pending_green and index > pending_green["index"]:
             if close > open_price and high > pending_green["high"]:
                 long_triggered = True
@@ -1090,56 +1103,64 @@ def backtest_liquidity_intraday(
                 long_triggered = False
                 pending_green = None
             if long_triggered:
-                if lower_entries_today >= max_entries_per_line:
+                # Confirmation also took out signal SL low → cancel setup, no entry.
+                if (
+                    skip_if_confirmation_hits_signal_stop
+                    and low <= pending_green["low"]
+                ):
+                    pending_green = None
+                    rejection_green = None
+                elif lower_entries_today >= max_entries_per_line:
                     pending_green = None
                     equity_curve.append(wallet_usd / starting_wallet)
                     continue
-                entry_price = close if require_close_beyond_signal else pending_green["high"]
-                stop_loss = pending_green["low"]
-                initial_stop_loss = stop_loss
-                risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
-                    "long", entry_price, stop_loss
-                )
-                signal = pending_green
-                if (
-                    _passes_liquidity_entry_filters(
-                        side="long",
-                        timestamp=timestamp,
-                        entry_price=entry_price,
-                        stop_loss=stop_loss,
-                        daily_rows=daily_rows,
-                        day=day,
-                        require_liquidity_sweep=False,
-                        signal_high=signal["high"],
-                        signal_low=signal["low"],
-                        signal_close=signal["close"],
-                        upper=upper,
-                        lower=lower,
-                        use_daily_trend_filter=use_daily_trend_filter,
-                        use_session_filter=use_session_filter,
-                        session_start_hour_delta=session_start_hour,
-                        session_end_hour_delta=session_end_hour,
+                else:
+                    entry_price = close if require_close_beyond_signal else pending_green["high"]
+                    stop_loss = pending_green["low"]
+                    initial_stop_loss = stop_loss
+                    risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
+                        "long", entry_price, stop_loss
                     )
-                    and target_1 > 0
-                    and entry_price < target_1
-                ):
-                    in_position = True
-                    side = "long"
-                    entry_line = "lower"
-                    entry_ts = timestamp
-                    target_stage = 0
-                    open_lots = position_lots
-                    entry_fee_remaining = _trading_fee_usd(
-                        entry_price, position_lots, fee_pct_per_side
-                    )
-                    trades_in_sequence += 1
-                    lower_entries_today += 1
-                    pending_green = None
-                    rejection_green = None
-                    reentry_side = ""
-                    reentry_pullback_seen = False
-                    entered_this_bar = True
-                    lower_rearmed = False
+                    signal = pending_green
+                    if (
+                        _passes_liquidity_entry_filters(
+                            side="long",
+                            timestamp=timestamp,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            daily_rows=daily_rows,
+                            day=day,
+                            require_liquidity_sweep=False,
+                            signal_high=signal["high"],
+                            signal_low=signal["low"],
+                            signal_close=signal["close"],
+                            upper=upper,
+                            lower=lower,
+                            use_daily_trend_filter=use_daily_trend_filter,
+                            use_session_filter=use_session_filter,
+                            session_start_hour_delta=session_start_hour,
+                            session_end_hour_delta=session_end_hour,
+                        )
+                        and target_1 > 0
+                        and entry_price < target_1
+                    ):
+                        in_position = True
+                        side = "long"
+                        entry_line = "lower"
+                        entry_ts = timestamp
+                        target_stage = 0
+                        open_lots = position_lots
+                        entry_fee_remaining = _trading_fee_usd(
+                            entry_price, position_lots, fee_pct_per_side
+                        )
+                        trades_in_sequence += 1
+                        lower_entries_today += 1
+                        pending_green = None
+                        rejection_green = None
+                        reentry_side = ""
+                        reentry_pullback_seen = False
+                        entered_this_bar = True
+                        lower_rearmed = False
 
         if not entered_this_bar and short_rejection:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
@@ -1205,6 +1226,7 @@ def backtest_liquidity_intraday(
         "skips_middle_zone_without_touch": True,
         "instrument_eth_futures": True,
         "requires_liquidity_sweep_rejection": require_liquidity_sweep,
+        "skips_if_confirmation_hits_signal_stop": skip_if_confirmation_hits_signal_stop,
         "uses_daily_trend_filter": use_daily_trend_filter,
         "uses_delta_india_session_filter": use_session_filter,
         "simulates_trading_fees": fee_pct_per_side > 0,

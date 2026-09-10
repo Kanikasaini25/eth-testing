@@ -699,6 +699,9 @@ class LiveLiquidityRunner:
         entry_on_next_candle = bool(params.get("entry_on_next_candle", True))
         require_close_beyond_signal = bool(params.get("require_close_beyond_signal", False))
         require_liquidity_sweep = bool(params.get("require_liquidity_sweep", True))
+        skip_if_confirmation_hits_signal_stop = bool(
+            params.get("skip_if_confirmation_hits_signal_stop", False)
+        )
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
         use_session_filter = bool(params.get("use_session_filter", False))
         session_start_hour = int(
@@ -780,7 +783,19 @@ class LiveLiquidityRunner:
             short_triggered = close < open_price and low < pending_red["low"]
             session.pending_red = None
             if short_triggered:
-                if session.upper_entries_today < max_entries_per_line:
+                # Confirmation also took out signal SL high → cancel setup, no entry.
+                if (
+                    skip_if_confirmation_hits_signal_stop
+                    and high >= pending_red["high"]
+                ):
+                    session.rejection_red = None
+                    msg = (
+                        f"SKIP SHORT: confirmation hit signal SL high "
+                        f"({pending_red['high']:.2f})"
+                    )
+                    self._log(msg)
+                    actions.append(msg)
+                elif session.upper_entries_today < max_entries_per_line:
                     entry_price = close if require_close_beyond_signal else pending_red["low"]
                     stop_loss = pending_red["high"]
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
@@ -836,7 +851,19 @@ class LiveLiquidityRunner:
             long_triggered = close > open_price and high > pending_green["high"]
             session.pending_green = None
             if long_triggered:
-                if session.lower_entries_today < max_entries_per_line:
+                # Confirmation also took out signal SL low → cancel setup, no entry.
+                if (
+                    skip_if_confirmation_hits_signal_stop
+                    and low <= pending_green["low"]
+                ):
+                    session.rejection_green = None
+                    msg = (
+                        f"SKIP LONG: confirmation hit signal SL low "
+                        f"({pending_green['low']:.2f})"
+                    )
+                    self._log(msg)
+                    actions.append(msg)
+                elif session.lower_entries_today < max_entries_per_line:
                     entry_price = close if require_close_beyond_signal else pending_green["high"]
                     stop_loss = pending_green["low"]
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(

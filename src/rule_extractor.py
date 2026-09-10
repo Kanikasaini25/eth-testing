@@ -82,6 +82,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "After a full stop loss, another entry from the same line is allowed until 3 daily attempts are reached.",
                 "After TP1 or TP2, the full position remains open while the stop locks the achieved R level.",
                 "Never take more than 3 trades in one sequence.",
+                "If the confirmation candle breaks the signal entry level and also takes out the signal stop wick, skip the trade (no entry, no wait for a third candle).",
                 "Backtest on ETH futures (e.g. ETHUSD on Delta Exchange).",
             ],
             parameters={
@@ -96,6 +97,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "require_close_beyond_signal": False,
                 "require_liquidity_sweep": True,
                 "require_two_consecutive_confirmation_candles": True,
+                "skip_if_confirmation_hits_signal_stop": True,
                 "use_daily_trend_filter": False,
                 "use_session_filter": True,
                 "session_start_hour_delta": 0,

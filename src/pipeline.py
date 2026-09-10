@@ -103,12 +103,17 @@ def run_pipeline(
     transcript_path = TRANSCRIPTS_DIR / f"{video_id}.txt"
     rules_path = STRATEGIES_DIR / f"{video_id}_rules.json"
 
-    if transcript_path.exists() and transcript_path.read_text(encoding="utf-8").strip():
+    # Prefer saved rules JSON so manual backtest tweaks (e.g. skip filters) stick
+    # across Run Analysis. Fall back to transcript extraction when missing.
+    if rules_path.exists():
+        rules = rules_from_json(rules_path.read_text(encoding="utf-8"))
+        if transcript_path.exists() and transcript_path.read_text(encoding="utf-8").strip():
+            transcript_text = transcript_path.read_text(encoding="utf-8")
+        else:
+            transcript_text = _cached_strategy_text(rules)
+    elif transcript_path.exists() and transcript_path.read_text(encoding="utf-8").strip():
         transcript_text = transcript_path.read_text(encoding="utf-8")
         rules = extract_rules_from_transcript(transcript_text)
-    elif rules_path.exists():
-        rules = rules_from_json(rules_path.read_text(encoding="utf-8"))
-        transcript_text = _cached_strategy_text(rules)
     else:
         transcript_data = fetch_transcript_text(video_url, languages=languages)
         transcript_text = transcript_data["text"]

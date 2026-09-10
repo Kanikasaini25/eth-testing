@@ -40,6 +40,7 @@
       "After a full stop loss, another entry from the same line is allowed until 3 daily attempts are reached.",
       "After TP1 or TP2, the full position remains open while the stop locks the achieved R level.",
       "Never take more than 3 trades in one sequence.",
+      "If the confirmation candle breaks the signal entry level and also takes out the signal stop wick, skip the trade (no entry, no wait for a third candle).",
       "Backtest on ETH futures (e.g. ETHUSD on Delta Exchange)."
     ],
     "parameters": {
@@ -54,6 +55,7 @@
       "require_close_beyond_signal": false,
       "require_liquidity_sweep": true,
       "require_two_consecutive_confirmation_candles": true,
+      "skip_if_confirmation_hits_signal_stop": true,
       "use_daily_trend_filter": false,
       "use_session_filter": true,
       "session_start_hour_delta": 0,

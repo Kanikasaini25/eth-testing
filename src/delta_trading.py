@@ -149,6 +149,28 @@ class DeltaTradingClient:
         raw = position.get("entry_price")
         return float(raw) if raw not in (None, "") else None
 
+    def get_leverage(self, symbol: str | None = None) -> float:
+        raw = self.client.get_order_leverage(self.get_product_id(symbol))
+        if isinstance(raw, dict):
+            return float(raw.get("leverage") or 0)
+        return float(raw or 0)
+
+    def set_leverage(self, leverage: float, symbol: str | None = None) -> dict[str, Any]:
+        """Set isolated order leverage for this product (needed before large entries)."""
+        lev = float(leverage)
+        if lev <= 0:
+            raise ValueError("leverage must be > 0")
+        return self.client.set_leverage(self.get_product_id(symbol), str(lev))
+
+    def ensure_leverage(self, leverage: float, symbol: str | None = None) -> float:
+        """Set leverage if different; return effective leverage."""
+        wanted = float(leverage)
+        current = self.get_leverage(symbol)
+        if abs(current - wanted) > 1e-9:
+            self.set_leverage(wanted, symbol)
+            current = self.get_leverage(symbol)
+        return current
+
     def place_market_order(
         self,
         size: int,

@@ -249,6 +249,14 @@ class LiveGrabRunner:
             )
             return actions
         side = "buy" if signal.side == "long" else "sell"
+        # PAXGUSD max leverage on Delta is typically 20x (higher values are rejected).
+        leverage = float(get_env("DELTA_LEVERAGE", "20") or "20")
+        try:
+            applied = self.broker.ensure_leverage(leverage)
+            actions.append(f"Leverage set to {applied:g}x (requested {leverage:g}x)")
+        except Exception as exc:
+            actions.append(f"Leverage set failed ({leverage:g}x): {exc}")
+            return actions
         self.broker.place_market_order(lots, side)
         fill = self.broker.get_position_entry_price() or signal.entry_price
         stop = signal.stop_loss

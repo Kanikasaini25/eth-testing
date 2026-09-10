@@ -105,9 +105,10 @@ def main() -> int:
         "Hammer / Shooting Star live runner · "
         f"{'DRY-RUN (no orders)' if dry_run else 'LIVE ORDERS'} · {symbol}"
     )
+    leverage = get_env("DELTA_LEVERAGE", "20") or "20"
     print(
         f"Rules: hammer/shooting star + 1m confirm only · {args.lots} lots · "
-        f"T1 +{params.target_points:.0f}"
+        f"T1 +{params.target_points:.0f} · leverage {leverage}x"
     )
     if is_email_configured():
         print("Email alerts: on (NOTIFY_EMAIL)")

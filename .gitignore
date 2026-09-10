@@ -3,6 +3,3 @@
 __pycache__/
 *.pyc
 data/live
-data/ohlcv
-data/transcripts
-transcripts.txt

@@ -1,14 +1,6 @@
-# YouTube Strategy Backtester
+# ETH Volume-Bias Strategy
 
-Analyze trading techniques from YouTube tutorials and backtest them on **Delta Exchange ETH futures** historical data.
-
-## What it does
-
-1. Fetches YouTube video transcript
-2. Extracts trading techniques (MACD, MA crossover, breakout)
-3. Downloads **ETHUSD 1d** candles from Delta Exchange
-4. Backtests each technique on historical data
-5. Saves a markdown report + JSON results
+Live ETH strategy on **Delta Exchange India**: measure buy vs sell volume through the India day, then at **7:00 PM IST** wait for one pullback and trade with the day's market power.
 
 ## Setup
 
@@ -19,67 +11,31 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your YouTube URL:
+Set `DELTA_API_KEY`, `DELTA_API_SECRET`, and (if needed) `DELTA_BASE_URL` in `.env`.
 
-```env
-YOUTUBE_URLS=https://www.youtube.com/watch?v=your-video-id
-DELTA_SYMBOL=ETHUSD
-DELTA_RESOLUTION=1d
-BACKTEST_DAYS=730
-```
-
-## Run with Streamlit UI
+## Run
 
 ```bash
 streamlit run app.py
 ```
 
-Open the app in your browser, enter a YouTube URL, and click **Run Analysis**.
-
-## Run full pipeline (CLI)
+Or from the CLI:
 
 ```bash
-python main.py
+python scripts/run_live_strategy.py --enable --loop
 ```
 
-Or with options:
+Open the **Backtest** tab, pick an IST date range, and click **Run backtest**. It pulls India-live **15m** and **1m** candles and shows trades, points, P/L, win rate, and wallet.
 
-```bash
-python main.py --url "https://youtube.com/watch?v=..." --symbol ETHUSD --days 365
-```
+## Strategy
 
-## Output
-
-| File | Description |
-|------|-------------|
-| `data/transcripts/{video_id}.txt` | Raw transcript |
-| `data/strategies/{video_id}_rules.json` | Extracted techniques |
-| `data/ohlcv/ETHUSD_1d.csv` | Delta Exchange candle data |
-| `data/reports/{video_id}_report.md` | Backtest report |
-| `data/reports/{video_id}_results.json` | Raw backtest metrics |
-
-## Transcript-only (legacy)
-
-```bash
-python extract_transcripts.py
-```
-
-## Supported techniques
-
-| Detected in transcript | Strategy |
-|------------------------|----------|
-| Golden cross / MA cross | Moving average crossover |
-| MACD | MACD signal crossover |
-| Breakout / resistance | Price breakout |
-
-If no clear rules are found, the pipeline stops with an error.
-
-## Delta Exchange
-
-- **India:** `https://api.india.delta.exchange` → symbol `ETHUSD`
-- **Global:** `https://api.delta.exchange` → symbol `ETHUSDT`
-
-No API key required for historical candle data.
+1. Watch India-live ETH volume until 19:00 IST (buy-side vs sell-side candle volume)
+2. Lock the stronger side
+3. Wait for one **15m pullback** against that side
+4. After the 15m pullback closes, wait for a **1m confirmation** candle with the day's power, then enter
+5. Stop = 15m pullback wick high/low
+6. Targets: **+1%** keep wick SL; **+2%** move SL to +1%; **+3%** SL to +2%; **+4%** SL to +3%; **+5%** close the full position
+7. If the stop hits, wait for the **next** 15m pullback and try again. After **2 wins** or **2 losses** in the same India day, stop trading until the next day.
 
 ## Disclaimer
 

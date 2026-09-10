@@ -1,139 +1,52 @@
+"""Live ETH India volume-bias strategy: day volume → 7pm IST pullback entry."""
+
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-from src.backtest import (
-    FIXED_ENTRY_LOTS,
-    _daily_liquidity_levels,
-    _liquidity_sweep_at_lower,
-    _liquidity_sweep_at_upper,
-    _liquidity_targets,
-    _passes_liquidity_entry_filters,
-    _signal_body_ratio,
-)
-from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs, get_env
-from src.delta_data import DeltaExchangeClient
+from src.config import LIVE_STATE_DIR, ensure_data_dirs, get_env
+from src.delta_data import RESOLUTION_SECONDS, DeltaExchangeClient
 from src.delta_trading import DeltaTradingClient
-
-# Signals follow India live; orders go to DELTA_BASE_URL (usually demo/testnet).
-INDIA_LIVE_DATA_URL = "https://api.india.delta.exchange"
-from src.email_notify import (
-    send_entry_signal_email,
-    send_partial_exit_email,
-    send_runner_exit_email,
-    send_stop_loss_email,
+from src.email_notify import send_entry_signal_email, send_stop_loss_email, send_take_profit_email
+from src.eth_volume_strategy import (
+    CLOSE_TARGET_PCT,
+    DEFAULT_ENTRY_HOUR_IST,
+    DEFAULT_ENTRY_RESOLUTION,
+    DEFAULT_POSITION_LOTS,
+    DEFAULT_PULLBACK_RESOLUTION,
+    closed_bars_on_day,
+    day_limit_reached,
+    decide_open_trade,
+    exit_side,
+    favorable_move_pct,
+    measure_volume_bias,
+    now_in_entry_window,
+    order_side,
+    pullback_and_confirmation,
+    pullback_stop_loss,
+    signed_points,
+    split_session_bars,
+    stop_is_valid,
+    target_price,
 )
-from src.rule_extractor import TradingRule, rules_from_json
-from src.timezone import delta_candle_day, format_delta_timestamp
+from src.live_state import (
+    LivePositionState, LiveSessionState, LiveTickResult,
+    append_log, env_float, env_int, load_strategy_state, save_strategy_state,
+)
+from src.timezone import india_today
 
-STOP_TICK_SIZE = 0.05
-
-
-def _normalize_pending_signal(pending: dict | None) -> dict | None:
-    """Drop legacy pending signals saved before the close field was added."""
-    if not pending:
-        return None
-    if "close" not in pending:
-        return None
-    return pending
+INDIA_LIVE_DATA_URL = "https://api.india.delta.exchange"
 
 
-def _pending_signal_close(pending: dict, side: str) -> float:
-    if "close" in pending:
-        return float(pending["close"])
-    return float(pending["low"] if side == "short" else pending["high"])
-
-
-@dataclass
-class LivePositionState:
-    side: str
-    entry_price: float
-    stop_loss: float
-    target_1: float
-    target_2: float
-    target_3: float
-    risk: float
-    entry_line: str
-    entry_ts: str
-    target_4: float = 0.0
-    target_stage: int = 0
-    entry_lots: int = FIXED_ENTRY_LOTS
-
-
-@dataclass
-class LiveSessionState:
-    day: str = ""
-    touched_upper: bool = False
-    touched_lower: bool = False
-    rejection_red: dict[str, float] | None = None
-    rejection_green: dict[str, float] | None = None
-    pending_red: dict[str, float] | None = None
-    pending_green: dict[str, float] | None = None
-    trades_in_sequence: int = 0
-    full_sl_count: int = 0
-    upper_entries_today: int = 0
-    lower_entries_today: int = 0
-    upper_line_blocked: bool = False
-    lower_line_blocked: bool = False
-    upper_rearmed: bool = True
-    lower_rearmed: bool = True
-    reentry_side: str = ""
-    reentry_pullback_seen: bool = False
-    last_processed_ts: str = ""
-
-
-@dataclass
-class LiveStrategyState:
-    enabled: bool = False
-    symbol: str = "ETHUSD"
-    session: LiveSessionState = field(default_factory=LiveSessionState)
-    position: LivePositionState | None = None
-    upper_level: float | None = None
-    lower_level: float | None = None
-    logs: list[str] = field(default_factory=list)
-
-
-@dataclass
-class LiveTickResult:
-    success: bool
-    actions: list[str] = field(default_factory=list)
-    mark_price: float | None = None
-    upper_level: float | None = None
-    lower_level: float | None = None
-    exchange_position: int = 0
-    in_position: bool = False
-    error: str = ""
-
-
-def default_rules_path() -> Path:
-    return STRATEGIES_DIR / "wI9b968AvW8_rules.json"
-
-
-def load_liquidity_rule(path: Path | None = None) -> TradingRule:
-    rules_path = path or default_rules_path()
-    if not rules_path.exists():
-        raise FileNotFoundError(f"Strategy rules not found: {rules_path}")
-    rules = rules_from_json(rules_path.read_text(encoding="utf-8"))
-    for rule in rules:
-        if rule.strategy_type == "liquidity":
-            return rule
-    raise ValueError(f"No liquidity strategy in {rules_path}")
-
-
-class LiveLiquidityRunner:
-    """Run LQDTY using India-live market data; place orders on the trade account (demo/live)."""
+class LiveEthVolumeRunner:
+    """Follow India-live ETH volume; place orders on the trade account."""
 
     def __init__(
         self,
         *,
         trading_client: DeltaTradingClient | None = None,
         data_client: DeltaExchangeClient | None = None,
-        rule: TradingRule | None = None,
-        rules_path: Path | None = None,
         state_path: Path | None = None,
         symbol: str | None = None,
         base_url: str | None = None,
@@ -143,62 +56,22 @@ class LiveLiquidityRunner:
         self.trading = trading_client or DeltaTradingClient(base_url=base_url)
         self.base_url = self.trading.base_url
         self.symbol = symbol or self.trading.symbol
-        resolved_data_url = (
-            data_base_url
-            or get_env("DELTA_DATA_BASE_URL", INDIA_LIVE_DATA_URL)
-            or INDIA_LIVE_DATA_URL
-        )
-        self.data_base_url = resolved_data_url.rstrip("/")
+        data_url = data_base_url or get_env("DELTA_DATA_BASE_URL", INDIA_LIVE_DATA_URL) or INDIA_LIVE_DATA_URL
+        self.data_base_url = data_url.rstrip("/")
         self.data = data_client or DeltaExchangeClient(base_url=self.data_base_url)
-        self.rule = rule or load_liquidity_rule(rules_path)
-        self.state_path = state_path or LIVE_STATE_DIR / f"{self.symbol}_live_state.json"
-        self.state = self._load_state()
-
-    def _load_state(self) -> LiveStrategyState:
-        if not self.state_path.exists():
-            return LiveStrategyState(symbol=self.symbol)
-        raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-        session = LiveSessionState(**raw.pop("session", {}))
-        session.pending_red = _normalize_pending_signal(session.pending_red)
-        session.pending_green = _normalize_pending_signal(session.pending_green)
-        position_raw = raw.pop("position", None)
-        if position_raw:
-            legacy_entry = float(position_raw["entry_price"])
-            legacy_stop = float(position_raw["stop_loss"])
-            legacy_risk = abs(legacy_entry - legacy_stop)
-            position_raw.setdefault("risk", legacy_risk)
-            position_raw.setdefault(
-                "target_3",
-                legacy_entry * 1.04
-                if position_raw["side"] == "long"
-                else legacy_entry * 0.96,
-            )
-            position_raw.setdefault(
-                "target_4",
-                legacy_entry * 1.05
-                if position_raw["side"] == "long"
-                else legacy_entry * 0.95,
-            )
-            position_raw.setdefault("target_stage", 0)
-            position_raw.pop("partial_taken", None)
-            position_raw.pop("runner_open", None)
-            position_raw.pop("best_price", None)
-            position_raw.pop("partial_lots", None)
-            position_raw.pop("runner_lots", None)
-            position = LivePositionState(**position_raw)
-        else:
-            position = None
-        return LiveStrategyState(session=session, position=position, **raw)
+        self.entry_hour_ist = env_int("ETH_ENTRY_HOUR_IST", DEFAULT_ENTRY_HOUR_IST)
+        self.target_pct = env_float("ETH_TARGET_PCT", CLOSE_TARGET_PCT)
+        self.position_lots = env_int("ETH_POSITION_LOTS", DEFAULT_POSITION_LOTS)
+        self.pullback_resolution = get_env("ETH_PULLBACK_RESOLUTION", DEFAULT_PULLBACK_RESOLUTION) or DEFAULT_PULLBACK_RESOLUTION
+        self.entry_resolution = get_env("ETH_ENTRY_RESOLUTION", DEFAULT_ENTRY_RESOLUTION) or DEFAULT_ENTRY_RESOLUTION
+        self.state_path = state_path or LIVE_STATE_DIR / f"{self.symbol}_volume_bias_state.json"
+        self.state = load_strategy_state(self.state_path, self.symbol)
 
     def _save_state(self) -> None:
-        payload = asdict(self.state)
-        self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        save_strategy_state(self.state_path, self.state)
 
     def _log(self, message: str) -> None:
-        stamp = format_delta_timestamp(datetime.now(timezone.utc).isoformat())
-        entry = f"[{stamp}] {message}"
-        self.state.logs.append(entry)
-        self.state.logs = self.state.logs[-100:]
+        append_log(self.state, message)
 
     def _send_email(self, result) -> None:
         if result.success:
@@ -206,799 +79,317 @@ class LiveLiquidityRunner:
         elif result.message and "disabled" not in result.message.lower():
             self._log(f"Email failed: {result.message}")
 
-    def _params(self) -> dict[str, Any]:
-        return self.rule.parameters
+    def set_enabled(self, enabled: bool) -> None:
+        self.state.enabled = enabled
+        self._log("Strategy ENABLED" if enabled else "Strategy DISABLED")
+        self._save_state()
 
     def _reset_session_if_new_day(self, day: str) -> None:
-        session = self.state.session
-        if session.day == day:
+        if self.state.session.day == day:
             return
-        session.day = day
-        session.touched_upper = False
-        session.touched_lower = False
-        session.rejection_red = None
-        session.rejection_green = None
-        session.pending_red = None
-        session.pending_green = None
-        session.trades_in_sequence = 0
-        session.full_sl_count = 0
-        session.upper_entries_today = 0
-        session.lower_entries_today = 0
-        session.upper_line_blocked = False
-        session.lower_line_blocked = False
-        session.upper_rearmed = True
-        session.lower_rearmed = True
-        session.reentry_side = ""
-        session.reentry_pullback_seen = False
-        session.last_processed_ts = ""
+        self.state.session = LiveSessionState(day=day)
 
-    def _today_levels(
-        self,
-        daily_rows: list[dict],
-        day: str,
-    ) -> tuple[float | None, float | None]:
-        levels = _daily_liquidity_levels(daily_rows)
-        day_levels = levels.get(day)
-        if not day_levels:
-            return None, None
-        return day_levels["upper"], day_levels["lower"]
-
-    def _fetch_market_data(self) -> tuple[list[dict], list[dict]]:
-        daily_rows = self.data.fetch_historical_ohlcv(
-            symbol=self.symbol,
-            resolution="1d",
-            days=int(self._params().get("swing_lookback_days", 20)) + 5,
-        )
-        intraday_rows = self.data.fetch_historical_ohlcv(
-            symbol=self.symbol,
-            resolution="1m",
-            days=2,
-        )
-        return daily_rows, intraday_rows
-
-    def _closed_bars_today(self, intraday_rows: list[dict], day: str) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        today_bars = [
-            row for row in intraday_rows
-            if delta_candle_day(row["timestamp"]) == day
-        ]
-        closed: list[dict] = []
-        for row in today_bars:
-            bar_time = datetime.fromisoformat(row["timestamp"])
-            bar_end = bar_time.timestamp() + 60
-            if bar_end <= now.timestamp():
-                closed.append(row)
-        return closed
-
-    def _new_closed_bars(self, closed_bars: list[dict]) -> list[dict]:
-        last_ts = self.state.session.last_processed_ts
-        if not last_ts:
-            return closed_bars
-        return [row for row in closed_bars if row["timestamp"] > last_ts]
-
-    def _order_side(self, side: str) -> str:
-        return "buy" if side == "long" else "sell"
-
-    def _exit_side(self, side: str) -> str:
-        return "sell" if side == "long" else "buy"
-
-    def _replace_runner_stop(
-        self,
-        position: LivePositionState,
-        stop_price: float,
-        mark_price: float | None = None,
-    ) -> None:
-        """Cancel old stops and place one reduce-only runner stop (or market exit if breached)."""
-        exit_side = self._exit_side(position.side)
-        mark = mark_price if mark_price is not None else self.trading.get_mark_price(self.symbol)
-
-        self.trading.cancel_open_orders(symbol=self.symbol)
-        if self.trading.stop_would_trigger_immediately(exit_side, stop_price, mark, symbol=self.symbol):
-            self.trading.place_market_order(
-                size=position.entry_lots,
-                side=exit_side,
-                symbol=self.symbol,
-                reduce_only=True,
-            )
-            self.state.position = None
-            self._log(f"Stop breached @ {mark:.2f} — closed {position.entry_lots} lots at market")
-            return
-
-        try:
-            self.trading.place_stop_order(
-                size=position.entry_lots,
-                side=exit_side,
-                stop_price=stop_price,
-                symbol=self.symbol,
-                reduce_only=True,
-                mark_price=mark,
-            )
-        except Exception as exc:
-            if "immediate_execution_stop_order" not in str(exc).lower():
-                raise
-            self.trading.place_market_order(
-                size=position.entry_lots,
-                side=exit_side,
-                symbol=self.symbol,
-                reduce_only=True,
-            )
-            self.state.position = None
-            self._log(f"Stop rejected @ {mark:.2f} — closed {position.entry_lots} lots at market")
-            return
-
-        position.stop_loss = stop_price
-
-    def _maybe_trail_runner_stop(
-        self,
-        position: LivePositionState,
-        mark_price: float,
-        trailing_points: float,
-    ) -> bool:
-        """Update runner stop only when it moves by at least one tick. Returns True if updated."""
-        if not (position.partial_taken and position.runner_open):
-            return False
-
-        if position.side == "long":
-            position.best_price = max(position.best_price, mark_price)
-            new_stop = max(position.entry_price, position.best_price - trailing_points)
-            if new_stop <= position.stop_loss + STOP_TICK_SIZE:
-                return False
-        else:
-            position.best_price = min(position.best_price or mark_price, mark_price)
-            new_stop = min(position.entry_price, position.best_price + trailing_points)
-            if new_stop >= position.stop_loss - STOP_TICK_SIZE:
-                return False
-
-        self._replace_runner_stop(position, new_stop, mark_price)
-        return True
-
-    def _expected_exchange_size(self) -> int:
-        """Signed lot size the exchange should show for the tracked position."""
-        position = self.state.position
-        if position is None:
-            return 0
-        lots = position.entry_lots
-        return -lots if position.side == "short" else lots
-
-    def _adjust_entry_stop_price(self, side: str, stop_loss: float, mark: float) -> float:
+    def _round_price(self, price: float) -> float:
         tick = self.trading.get_product_tick_size(self.symbol)
-        if side == "short" and stop_loss <= mark + tick:
-            return mark + max(tick, 3.0)
-        if side == "long" and stop_loss >= mark - tick:
-            return mark - max(tick, 3.0)
-        return stop_loss
+        if tick <= 0:
+            return price
+        return round(round(price / tick) * tick, 8)
 
-    def _place_entry_stop(
-        self,
-        side: str,
-        stop_side: str,
-        stop_loss: float,
-        entry_lots: int,
-    ) -> float:
+    def _place_protective_orders(self, side: str, stop_loss: float, target: float, lots: int) -> None:
+        exit_side_name = exit_side(side)
         mark = self.trading.get_mark_price(self.symbol)
         self.trading.place_stop_order(
-            size=entry_lots,
-            side=stop_side,
-            stop_price=stop_loss,
-            symbol=self.symbol,
-            reduce_only=True,
-            mark_price=mark,
+            size=lots, side=exit_side_name, stop_price=stop_loss, symbol=self.symbol, reduce_only=True, mark_price=mark
         )
-        return stop_loss
+        self.trading.place_limit_order(
+            size=lots, side=exit_side_name, limit_price=target, symbol=self.symbol, reduce_only=True
+        )
 
-    def _execute_entry(
-        self,
-        side: str,
-        entry_price: float,
-        stop_loss: float,
-        target_1: float,
-        target_2: float,
-        target_3: float,
-        target_4: float,
-        risk: float,
-        entry_line: str,
-        entry_ts: str,
-    ) -> list[str]:
-        params = self._params()
-        entry_lots = int(params.get("position_lots", FIXED_ENTRY_LOTS))
-        order_side = self._order_side(side)
-        stop_side = self._exit_side(side)
+    def _rollback_entry(self, lots: int, close_side: str, reason: str) -> list[str]:
+        self._log(reason)
+        try:
+            self.trading.place_market_order(size=lots, side=close_side, symbol=self.symbol, reduce_only=True)
+            return [reason]
+        except Exception as rollback_exc:  # noqa: BLE001
+            detail = f"CRITICAL: {lots} lots open; rollback failed: {rollback_exc}"
+            self._log(detail)
+            return [reason, detail]
 
-        exchange_size = self.trading.get_open_position_size(self.symbol)
-        if exchange_size != 0:
+    def _execute_entry(self, side: str, mark_price: float, pullback) -> list[str]:
+        lots = self.position_lots
+        stop_loss = self._round_price(pullback_stop_loss(pullback, side))
+        target = self._round_price(target_price(side, mark_price, self.target_pct))
+        if not stop_is_valid(side, mark_price, stop_loss):
+            self.state.session.after_pullback_ts = pullback.timestamp
             msg = (
-                f"Entry blocked: exchange has {exchange_size} lots but bot is flat — "
-                "flatten on Delta first"
+                f"Skip {side}: pullback wick SL {stop_loss:.2f} is not valid vs mark {mark_price:.2f} "
+                "— waiting for next 15m pullback"
             )
             self._log(msg)
             return [msg]
+        if self.trading.get_open_position_size(self.symbol) != 0:
+            msg = "Entry blocked: exchange already has a position"
+            self._log(msg)
+            return [msg]
 
-        self.trading.place_market_order(size=entry_lots, side=order_side, symbol=self.symbol)
+        self.trading.place_market_order(size=lots, side=order_side(side), symbol=self.symbol)
         try:
-            placed_sl = self._place_entry_stop(side, stop_side, stop_loss, entry_lots)
-        except Exception as exc:
-            rollback_msg = f"Stop order failed — rolling back {entry_lots} lots"
-            self._log(rollback_msg)
-            try:
-                self.trading.place_market_order(
-                    size=entry_lots,
-                    side=stop_side,
-                    symbol=self.symbol,
-                    reduce_only=True,
-                )
-                detail = f"Entry aborted: {exc}"
-            except Exception as rollback_exc:
-                detail = (
-                    f"CRITICAL: {entry_lots} lots open on exchange, stop and rollback failed: "
-                    f"{rollback_exc}"
-                )
-            self._log(detail)
-            return [rollback_msg, detail]
+            self._place_protective_orders(side, stop_loss, target, lots)
+        except Exception as exc:  # noqa: BLE001
+            return self._rollback_entry(lots, exit_side(side), f"Protective orders failed — rolling back: {exc}")
 
+        session = self.state.session
+        session.pullback = {"timestamp": pullback.timestamp, "high": pullback.high, "low": pullback.low}
         self.state.position = LivePositionState(
             side=side,
-            entry_price=entry_price,
-            stop_loss=placed_sl,
-            target_1=target_1,
-            target_2=target_2,
-            target_3=target_3,
-            target_4=target_4,
-            risk=risk,
-            entry_line=entry_line,
-            entry_ts=entry_ts,
-            entry_lots=entry_lots,
-        )
-        action = f"ENTER {side.upper()} {entry_lots} lots @ ~{entry_price:.2f}, SL {placed_sl:.2f}"
-        self._log(action)
-
-        email_result = send_entry_signal_email(
-            symbol=self.symbol,
-            side=side,
-            entry_price=entry_price,
+            entry_price=mark_price,
             stop_loss=stop_loss,
-            target_1=target_1,
-            target_2=target_2,
-            target_3=target_3,
-            target_4=target_4,
-            risk=risk,
-            entry_lots=entry_lots,
-            entry_line=entry_line,
-            entry_ts=entry_ts,
-            upper_level=self.state.upper_level,
-            lower_level=self.state.lower_level,
+            target=target,
+            entry_ts=pullback.timestamp,
+            entry_lots=lots,
+            pullback_high=pullback.high,
+            pullback_low=pullback.low,
+            initial_stop_loss=stop_loss,
         )
-        self._send_email(email_result)
-
-        return [action]
-
-    def _execute_partial_exit(self, position: LivePositionState, exit_price: float) -> list[str]:
-        exit_side = self._exit_side(position.side)
-        self.trading.cancel_open_orders(symbol=self.symbol)
-        self.trading.place_market_order(
-            size=position.partial_lots,
-            side=exit_side,
-            symbol=self.symbol,
-            reduce_only=True,
-        )
-
-        params = self._params()
-        trailing_points = float(params.get("trailing_stop_points", 3.0))
-        use_trailing = bool(params.get("use_trailing_stop_after_partial", True))
-        if use_trailing:
-            if position.side == "long":
-                position.best_price = max(position.target_1, exit_price)
-                position.stop_loss = max(position.entry_price, position.best_price - trailing_points)
-            else:
-                position.best_price = min(position.target_1, exit_price)
-                position.stop_loss = min(position.entry_price, position.best_price + trailing_points)
-        else:
-            position.stop_loss = position.entry_price
-
-        self._replace_runner_stop(position, position.stop_loss, exit_price)
-        position.partial_taken = True
-        position.runner_open = True
-
         action = (
-            f"PARTIAL EXIT {position.partial_lots} lots @ ~{exit_price:.2f}, "
-            f"runner SL {position.stop_loss:.2f}"
+            f"ENTER {side.upper()} {lots} lots @ ~{mark_price:.2f}, "
+            f"SL {stop_loss:.2f} (wick), TP {target:.2f} (+{self.target_pct:.0f}%)"
         )
         self._log(action)
         self._send_email(
-            send_partial_exit_email(
-                symbol=self.symbol,
-                side=position.side,
-                entry_price=position.entry_price,
-                exit_price=exit_price,
-                partial_lots=position.partial_lots,
-                runner_lots=position.runner_lots,
-                runner_stop_loss=position.stop_loss,
-                target_1=position.target_1,
-            )
-        )
-        return [action]
-
-    def _execute_runner_exit(
-        self,
-        position: LivePositionState,
-        exit_price: float,
-        reason: str,
-    ) -> list[str]:
-        exit_side = self._exit_side(position.side)
-        self.trading.cancel_open_orders(symbol=self.symbol)
-        self.trading.place_market_order(
-            size=position.runner_lots,
-            side=exit_side,
-            symbol=self.symbol,
-            reduce_only=True,
-        )
-        self.state.position = None
-        action = f"RUNNER EXIT ({reason}) {position.runner_lots} lots @ ~{exit_price:.2f}"
-        self._log(action)
-        if reason in {"trailing_stop", "breakeven_stop", "stop_loss"}:
-            self._send_email(
-                send_stop_loss_email(
-                    symbol=self.symbol,
-                    side=position.side,
-                    entry_price=position.entry_price,
-                    exit_price=exit_price,
-                    lots=position.runner_lots,
-                    stop_loss=position.stop_loss,
-                    exit_type=reason,
-                    partial_was_taken=True,
-                )
-            )
-        else:
-            self._send_email(
-                send_runner_exit_email(
-                    symbol=self.symbol,
-                    side=position.side,
-                    entry_price=position.entry_price,
-                    exit_price=exit_price,
-                    runner_lots=position.runner_lots,
-                    reason=reason,
-                )
-            )
-        return [action]
-
-    def _execute_full_stop(self, position: LivePositionState, exit_price: float) -> list[str]:
-        self.trading.cancel_open_orders(symbol=self.symbol)
-        self.trading.close_position_at_market(symbol=self.symbol)
-        session = self.state.session
-        if position.target_stage == 0:
-            session.full_sl_count += 1
-        self.state.position = None
-        action = f"STOP LOSS {position.entry_lots} lots @ ~{exit_price:.2f}"
-        self._log(action)
-        self._send_email(
-            send_stop_loss_email(
-                symbol=self.symbol,
-                side=position.side,
-                entry_price=position.entry_price,
-                exit_price=exit_price,
-                lots=position.entry_lots,
-                stop_loss=position.stop_loss,
-                exit_type="stop_loss",
-                partial_was_taken=position.target_stage > 0,
-            )
-        )
-        return [action]
-
-    def _sync_exchange_flat(self, mark_price: float) -> list[str]:
-        position = self.state.position
-        if position is None:
-            return []
-
-        was_partial = position.target_stage > 0
-        stop_loss = position.stop_loss
-        entry_price = position.entry_price
-        side = position.side
-        lots = position.entry_lots
-        session = self.state.session
-        if not was_partial:
-            session.full_sl_count += 1
-        self.state.position = None
-        action = f"Position closed on exchange @ ~{mark_price:.2f}"
-        self._log(action)
-        self._send_email(
-            send_stop_loss_email(
+            send_entry_signal_email(
                 symbol=self.symbol,
                 side=side,
-                entry_price=entry_price,
-                exit_price=mark_price,
-                lots=lots,
+                entry_price=mark_price,
                 stop_loss=stop_loss,
-                exit_type="exchange_stop",
-                partial_was_taken=was_partial,
+                target=target,
+                entry_lots=lots,
+                entry_ts=pullback.timestamp,
+                buy_volume=session.buy_volume,
+                sell_volume=session.sell_volume,
+                pullback_high=pullback.high,
+                pullback_low=pullback.low,
             )
         )
+        return [action]
+
+    def _notify_exit(self, position: LivePositionState, mark_price: float, *, take_profit: bool, exchange: bool) -> None:
+        if take_profit:
+            self._send_email(
+                send_take_profit_email(
+                    symbol=self.symbol,
+                    side=position.side,
+                    entry_price=position.entry_price,
+                    exit_price=mark_price,
+                    lots=position.entry_lots,
+                    target=position.target,
+                )
+            )
+            return
+        self._send_email(
+            send_stop_loss_email(
+                symbol=self.symbol,
+                side=position.side,
+                entry_price=position.entry_price,
+                exit_price=mark_price,
+                lots=position.entry_lots,
+                stop_loss=position.stop_loss,
+                exit_type="exchange_stop" if exchange else "stop_loss",
+            )
+        )
+
+    def _finish_exit(self, position: LivePositionState, mark_price: float) -> None:
+        session = self.state.session
+        points = round(signed_points(position.side, position.entry_price, mark_price), 2)
+        if points > 0:
+            session.wins_today += 1
+        elif points < 0:
+            session.losses_today += 1
+        session.after_pullback_ts = position.entry_ts
+        session.traded_today = day_limit_reached(session.wins_today, session.losses_today)
+        if session.traded_today:
+            reason = "2 wins" if session.wins_today >= 2 else "2 losses"
+            self._log(f"{reason} today — no more entries today")
+            return
+        initial = position.initial_stop_loss or position.stop_loss
+        if abs(position.stop_loss - initial) < 1e-8:
+            self._log("Stop hit pullback wick — waiting for next 15m pullback + 1m confirmation")
+            return
+        self._log("Trade closed — waiting for next 15m pullback + 1m confirmation")
+
+    def _close_at_market(self, position: LivePositionState, mark_price: float, reason: str) -> list[str]:
+        take_profit = reason.startswith("TAKE PROFIT")
+        self.trading.cancel_open_orders(symbol=self.symbol)
+        self.trading.close_position_at_market(symbol=self.symbol)
+        self.state.position = None
+        self._finish_exit(position, mark_price)
+        action = f"{reason} {position.entry_lots} lots @ ~{mark_price:.2f}"
+        self._log(action)
+        self._notify_exit(position, mark_price, take_profit=take_profit, exchange=False)
+        return [action]
+
+    def _sync_exchange_flat(self, position: LivePositionState, mark_price: float) -> list[str]:
+        take_profit = abs(mark_price - position.target) <= abs(mark_price - position.stop_loss)
+        reason = "TAKE PROFIT" if take_profit else "STOP LOSS"
+        self.trading.cancel_open_orders(symbol=self.symbol)
+        self.state.position = None
+        self._finish_exit(position, mark_price)
+        action = f"{reason} (exchange flat) {position.entry_lots} lots @ ~{mark_price:.2f}"
+        self._log(action)
+        self._notify_exit(position, mark_price, take_profit=take_profit, exchange=True)
+        return [action]
+
+    def _apply_trail_stop(self, position: LivePositionState, new_stop: float, mark_price: float) -> list[str]:
+        new_stop = self._round_price(new_stop)
+        self.trading.cancel_open_orders(symbol=self.symbol)
+        try:
+            self._place_protective_orders(position.side, new_stop, position.target, position.entry_lots)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._place_protective_orders(
+                    position.side, position.stop_loss, position.target, position.entry_lots
+                )
+            except Exception as restore_exc:  # noqa: BLE001
+                return self._close_at_market(
+                    position,
+                    mark_price,
+                    f"STOP LOSS (trail replace failed: {exc}; restore failed: {restore_exc})",
+                )
+            msg = f"Trail SL failed, restored prior SL {position.stop_loss:.2f}: {exc}"
+            self._log(msg)
+            return [msg]
+        locked = favorable_move_pct(position.side, position.entry_price, mark_price)
+        position.stop_loss = new_stop
+        action = f"TRAIL SL to {new_stop:.2f} (move {locked:.2f}%)"
+        self._log(action)
         return [action]
 
     def _manage_open_position(self, mark_price: float) -> list[str]:
         position = self.state.position
         if position is None:
             return []
-
-        actions: list[str] = []
-        entered_this_bar = False
-
         exchange_size = self.trading.get_open_position_size(self.symbol)
         if exchange_size == 0:
-            return self._sync_exchange_flat(mark_price)
-
-        expected = self._expected_exchange_size()
+            return self._sync_exchange_flat(position, mark_price)
+        expected = position.entry_lots if position.side == "long" else -position.entry_lots
         if exchange_size != expected:
-            msg = (
-                f"Position mismatch: exchange {exchange_size} lots vs tracked {expected} — "
-                "flatten on Delta and reset state before continuing"
-            )
+            msg = f"Position mismatch: exchange {exchange_size} vs tracked {expected}"
             self._log(msg)
             return [msg]
+        initial_stop = position.initial_stop_loss or position.stop_loss
+        action, new_stop = decide_open_trade(
+            position.side,
+            position.entry_price,
+            initial_stop,
+            position.stop_loss,
+            position.target,
+            mark_price,
+        )
+        if action == "take_profit":
+            return self._close_at_market(position, mark_price, "TAKE PROFIT")
+        if action == "stop_loss":
+            return self._close_at_market(position, mark_price, "STOP LOSS")
+        if action == "trail":
+            return self._apply_trail_stop(position, new_stop, mark_price)
+        return []
 
-        favorable = mark_price if position.side == "long" else -mark_price
-        targets = [
-            position.target_1,
-            position.target_2,
-            position.target_3,
-            position.target_4,
-        ]
-        signed_targets = targets if position.side == "long" else [-target for target in targets]
-        if favorable >= signed_targets[3]:
-            self.trading.cancel_open_orders(symbol=self.symbol)
-            self.trading.close_position_at_market(symbol=self.symbol)
-            self.state.session.reentry_side = position.side
-            self.state.session.reentry_pullback_seen = False
-            self.state.position = None
-            action = f"TAKE PROFIT (+5%) — closed {position.entry_lots} lots @ ~{mark_price:.2f}"
-            self._log(action)
-            actions.append(action)
-        else:
-            while position.target_stage < 2 and favorable >= signed_targets[position.target_stage + 1]:
-                position.target_stage += 1
-                stop_price = position.target_1 if position.target_stage == 1 else position.target_2
-                self._replace_runner_stop(position, stop_price, mark_price)
-                locked_pct = 2 if position.target_stage == 1 else 3
-                action = f"+{locked_pct + 1}% reached — SL moved to +{locked_pct}% ({stop_price:.2f})"
-                self._log(action)
-                actions.append(action)
-            stop_hit = (
-                mark_price <= position.stop_loss
-                if position.side == "long"
-                else mark_price >= position.stop_loss
-            )
-            if stop_hit:
-                if position.target_stage > 0:
-                    self.state.session.reentry_side = position.side
-                    self.state.session.reentry_pullback_seen = False
-                else:
-                    if position.entry_line == "upper":
-                        self.state.session.upper_rearmed = True
-                    elif position.entry_line == "lower":
-                        self.state.session.lower_rearmed = True
-                actions.extend(self._execute_full_stop(position, mark_price))
-
-        return actions
-
-    def _process_entry_bar(
+    def _maybe_enter(
         self,
-        row: dict,
-        prev_row: dict | None,
-        daily_rows: list[dict],
-        upper: float,
-        lower: float,
+        pullback_bars: list[dict],
+        entry_bars_1m: list[dict],
+        mark_price: float,
     ) -> list[str]:
-        if self.state.position is not None:
-            return []
-
-        params = self._params()
         session = self.state.session
-        max_trades = int(params.get("max_trades_per_sequence", 3))
-        max_full_sl = int(params.get("max_full_stop_losses_per_session", 3))
-        max_entries_per_line = int(params.get("max_entries_per_liquidity_line_per_day", 3))
-        min_signal_body_ratio = float(params.get("min_signal_body_ratio", 0.0))
-        min_signal_range_points = float(params.get("min_signal_range_points", 0.0))
-        entry_on_next_candle = bool(params.get("entry_on_next_candle", True))
-        require_close_beyond_signal = bool(params.get("require_close_beyond_signal", False))
-        require_liquidity_sweep = bool(params.get("require_liquidity_sweep", True))
-        use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
-        use_session_filter = bool(params.get("use_session_filter", False))
-        session_start_hour = int(
-            params.get("session_start_hour_delta", params.get("session_start_hour_utc", 8))
-        )
-        session_end_hour = int(
-            params.get("session_end_hour_delta", params.get("session_end_hour_utc", 20))
-        )
-        swing_lookback = int(params.get("swing_lookback_days", 20))
-        runner_swing_lookback = int(params.get("runner_swing_lookback_days", 60))
-
-        if session.full_sl_count >= max_full_sl or session.trades_in_sequence >= max_trades:
+        if self.state.position is not None or session.traded_today or not session.bias:
+            if session.traded_today and self.state.position is None:
+                return [
+                    f"Day closed ({session.wins_today} wins / {session.losses_today} losses) "
+                    "— no more entries today"
+                ]
             return []
-
-        timestamp = row["timestamp"]
-        day = timestamp[:10]
-        open_price = float(row["open"])
-        high = float(row["high"])
-        low = float(row["low"])
-        close = float(row["close"])
-
-        if high >= upper:
-            session.touched_upper = True
-        if low <= lower:
-            session.touched_lower = True
-
-        if session.reentry_side == "short" and close > open_price:
-            session.reentry_pullback_seen = True
-        elif session.reentry_side == "long" and close < open_price:
-            session.reentry_pullback_seen = True
-
-        if not session.touched_upper and not session.touched_lower and not session.reentry_side:
-            return []
-
-        actions: list[str] = []
-        if self.state.position is None:
-            if low < upper:
-                session.upper_rearmed = True
-            if high > lower:
-                session.lower_rearmed = True
-        entered_this_bar = False
-        short_rejection = (
-            session.reentry_side != "long"
-            and
-            session.touched_upper
-            and session.upper_rearmed
-            and high > upper
-            and close < open_price
+        if not now_in_entry_window(self.entry_hour_ist):
+            return [f"Observing India session volume — entries start at {self.entry_hour_ist:02d}:00 IST"]
+        pullback, confirm = pullback_and_confirmation(
+            pullback_bars,
+            entry_bars_1m,
+            session.day,
+            session.bias,
+            self.entry_hour_ist,
+            self.pullback_resolution,
+            session.after_pullback_ts,
         )
-        short_rejection = short_rejection or (
-            session.reentry_side == "short"
-            and session.reentry_pullback_seen
-            and close < open_price
+        if pullback is None:
+            waiting = "next 15m pullback" if session.after_pullback_ts else "one 15m pullback"
+            return [f"Bias {session.bias.upper()} locked — waiting for {waiting}"]
+        session.pullback = {"timestamp": pullback.timestamp, "high": pullback.high, "low": pullback.low}
+        if confirm is None:
+            return ["15m pullback seen — waiting for 1m confirmation"]
+        return self._execute_entry(session.bias, mark_price, pullback)
+
+    def _update_volume_bias(self, closed_bars: list[dict]) -> None:
+        session = self.state.session
+        bias_bars, _entry_bars = split_session_bars(closed_bars, session.day, self.entry_hour_ist)
+        measured = measure_volume_bias(bias_bars)
+        session.buy_volume = measured.buy_volume
+        session.sell_volume = measured.sell_volume
+        if not now_in_entry_window(self.entry_hour_ist):
+            session.bias = measured.side
+            session.bias_locked = False
+            return
+        if session.bias_locked:
+            return
+        session.bias = measured.side
+        session.bias_locked = True
+        self._log(
+            f"Bias locked {measured.label} (buy vol {measured.buy_volume:.4f} / sell vol {measured.sell_volume:.4f})"
         )
-        long_rejection = (
-            session.reentry_side != "short"
-            and
-            session.touched_lower
-            and session.lower_rearmed
-            and low < lower
-            and close > open_price
-        )
-        long_rejection = long_rejection or (
-            session.reentry_side == "long"
-            and session.reentry_pullback_seen
-            and close > open_price
-        )
-        if session.rejection_red and timestamp > session.rejection_red["index_ts"]:
-            if close < open_price:
-                session.pending_red = {"high": high, "low": low, "close": close, "index_ts": timestamp}
-            session.rejection_red = None
-        if session.rejection_green and timestamp > session.rejection_green["index_ts"]:
-            if close > open_price:
-                session.pending_green = {"high": high, "low": low, "close": close, "index_ts": timestamp}
-            session.rejection_green = None
-
-        pending_red = session.pending_red
-        if pending_red and timestamp > pending_red["index_ts"]:
-            short_triggered = close < open_price and low < pending_red["low"]
-            session.pending_red = None
-            if short_triggered:
-                if session.upper_entries_today < max_entries_per_line:
-                    entry_price = close if require_close_beyond_signal else pending_red["low"]
-                    stop_loss = pending_red["high"]
-                    risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
-                        "short", entry_price, stop_loss
-                    )
-                    signal = pending_red
-                    if (
-                        _passes_liquidity_entry_filters(
-                            side="short",
-                            timestamp=timestamp,
-                            entry_price=entry_price,
-                            stop_loss=stop_loss,
-                            daily_rows=daily_rows,
-                            day=day,
-                            require_liquidity_sweep=False,
-                            signal_high=signal["high"],
-                            signal_low=signal["low"],
-                            signal_close=_pending_signal_close(signal, "short"),
-                            upper=upper,
-                            lower=lower,
-                            use_daily_trend_filter=use_daily_trend_filter,
-                            use_session_filter=use_session_filter,
-                            session_start_hour_delta=session_start_hour,
-                            session_end_hour_delta=session_end_hour,
-                        )
-                        and target_1 > 0
-                        and entry_price > target_1
-                    ):
-                        session.trades_in_sequence += 1
-                        session.upper_entries_today += 1
-                        actions.extend(
-                            self._execute_entry(
-                                "short",
-                                entry_price,
-                                stop_loss,
-                                target_1,
-                                target_2,
-                                target_3,
-                                target_4,
-                                risk,
-                                "upper",
-                                timestamp,
-                            )
-                        )
-                        session.rejection_red = None
-                        entered_this_bar = True
-                        session.upper_rearmed = False
-                        session.reentry_side = ""
-                        session.reentry_pullback_seen = False
-
-        pending_green = session.pending_green
-        if pending_green and timestamp > pending_green["index_ts"]:
-            long_triggered = close > open_price and high > pending_green["high"]
-            session.pending_green = None
-            if long_triggered:
-                if session.lower_entries_today < max_entries_per_line:
-                    entry_price = close if require_close_beyond_signal else pending_green["high"]
-                    stop_loss = pending_green["low"]
-                    risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
-                        "long", entry_price, stop_loss
-                    )
-                    signal = pending_green
-                    if (
-                        _passes_liquidity_entry_filters(
-                            side="long",
-                            timestamp=timestamp,
-                            entry_price=entry_price,
-                            stop_loss=stop_loss,
-                            daily_rows=daily_rows,
-                            day=day,
-                            require_liquidity_sweep=False,
-                            signal_high=signal["high"],
-                            signal_low=signal["low"],
-                            signal_close=_pending_signal_close(signal, "long"),
-                            upper=upper,
-                            lower=lower,
-                            use_daily_trend_filter=use_daily_trend_filter,
-                            use_session_filter=use_session_filter,
-                            session_start_hour_delta=session_start_hour,
-                            session_end_hour_delta=session_end_hour,
-                        )
-                        and target_1 > 0
-                        and entry_price < target_1
-                    ):
-                        session.trades_in_sequence += 1
-                        session.lower_entries_today += 1
-                        actions.extend(
-                            self._execute_entry(
-                                "long",
-                                entry_price,
-                                stop_loss,
-                                target_1,
-                                target_2,
-                                target_3,
-                                target_4,
-                                risk,
-                                "lower",
-                                timestamp,
-                            )
-                        )
-                        session.rejection_green = None
-                        entered_this_bar = True
-                        session.lower_rearmed = False
-                        session.reentry_side = ""
-                        session.reentry_pullback_seen = False
-
-        if not entered_this_bar and short_rejection:
-            body_ratio = _signal_body_ratio(open_price, high, low, close)
-            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
-            range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
-            if body_ok and range_ok:
-                target = {"high": high, "low": low, "close": close, "index_ts": timestamp}
-                if close < open_price:
-                    session.pending_red = target
-                else:
-                    session.rejection_red = target
-        if not entered_this_bar and long_rejection:
-            body_ratio = _signal_body_ratio(open_price, high, low, close)
-            body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
-            range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
-            if body_ok and range_ok:
-                target = {"high": high, "low": low, "close": close, "index_ts": timestamp}
-                if close > open_price:
-                    session.pending_green = target
-                else:
-                    session.rejection_green = target
-
-        return actions
 
     def tick(self, *, dry_run: bool = False) -> LiveTickResult:
         if not self.trading.is_configured:
             return LiveTickResult(success=False, error="Delta API credentials not configured")
-
         if not self.state.enabled and not dry_run:
-            return LiveTickResult(
-                success=True,
-                actions=["Strategy disabled — turn on 'Strategy enabled' to place live orders"],
-                in_position=self.state.position is not None,
-            )
-
+            return LiveTickResult(success=True, actions=["Strategy disabled"], in_position=self.state.position is not None)
         try:
-            daily_rows, intraday_rows = self._fetch_market_data()
-            # Strategy decisions follow India-live mark; fills execute on trade account.
+            pullback_rows = self.data.fetch_historical_ohlcv(
+                symbol=self.symbol, resolution=self.pullback_resolution, days=2
+            )
+            entry_rows = self.data.fetch_historical_ohlcv(
+                symbol=self.symbol, resolution=self.entry_resolution, days=2
+            )
             mark_price = self.data.fetch_mark_price(self.symbol)
-            # Delta daily candles are labelled by their UTC calendar day.
-            day = datetime.now(timezone.utc).date().isoformat()
+            day = india_today()
             self._reset_session_if_new_day(day)
-
-            upper, lower = self._today_levels(daily_rows, day)
-            self.state.upper_level = upper
-            self.state.lower_level = lower
-
-            if upper is None or lower is None:
-                self._save_state()
-                return LiveTickResult(
-                    success=True,
-                    mark_price=mark_price,
-                    upper_level=upper,
-                    lower_level=lower,
-                    exchange_position=self.trading.get_open_position_size(self.symbol),
-                    in_position=self.state.position is not None,
-                    actions=["Waiting for daily liquidity levels"],
-                )
-
+            now_ts = datetime.now(timezone.utc).timestamp()
+            closed_15m = closed_bars_on_day(
+                pullback_rows, day, now_ts, RESOLUTION_SECONDS.get(self.pullback_resolution, 900)
+            )
+            closed_1m = closed_bars_on_day(
+                entry_rows, day, now_ts, RESOLUTION_SECONDS.get(self.entry_resolution, 60)
+            )
+            self._update_volume_bias(closed_15m)
             actions: list[str] = []
-
             if self.state.position is not None:
-                if dry_run:
-                    actions.append(f"[DRY RUN] Manage position @ {mark_price:.2f}")
+                actions.extend(["[DRY RUN] Manage position"] if dry_run else self._manage_open_position(mark_price))
+            if self.state.position is None:
+                if self.trading.get_open_position_size(self.symbol) != 0:
+                    actions.append("Orphan position on exchange — close on Delta before new entries")
+                elif dry_run:
+                    actions.append("[DRY RUN] Scan complete — no orders placed")
                 else:
-                    actions.extend(self._manage_open_position(mark_price))
-            else:
-                exchange_size = self.trading.get_open_position_size(self.symbol)
-                if exchange_size != 0:
-                    actions.append(
-                        f"Orphan position on exchange: {exchange_size} lots — "
-                        "bot is flat; close on Delta before new entries"
-                    )
-                else:
-                    closed_bars = self._closed_bars_today(intraday_rows, day)
-                    new_bars = self._new_closed_bars(closed_bars)
-                    bar_index = {row["timestamp"]: idx for idx, row in enumerate(closed_bars)}
-                    processed = 0
-
-                    for row in new_bars:
-                        prev_row = None
-                        idx = bar_index.get(row["timestamp"])
-                        if idx is not None and idx > 0:
-                            prev_row = closed_bars[idx - 1]
-                        if not dry_run:
-                            actions.extend(
-                                self._process_entry_bar(row, prev_row, daily_rows, upper, lower)
-                            )
-                        processed += 1
-                        self.state.session.last_processed_ts = row["timestamp"]
-                        if self.state.position is not None:
-                            break
-
-                    if dry_run and processed:
-                        actions.append(f"[DRY RUN] Scanned {processed} closed 1m bars — no orders placed")
-                    elif processed and not actions:
-                        actions.append(f"Scanned {processed} new 1m bars — no entry signal")
-
-            exchange_position = self.trading.get_open_position_size(self.symbol)
+                    actions.extend(self._maybe_enter(closed_15m, closed_1m, mark_price))
+            if closed_1m:
+                self.state.session.last_processed_ts = closed_1m[-1]["timestamp"]
             self._save_state()
+            session = self.state.session
             return LiveTickResult(
                 success=True,
                 actions=actions or ["No action this tick"],
                 mark_price=mark_price,
-                upper_level=upper,
-                lower_level=lower,
-                exchange_position=exchange_position,
+                buy_volume=session.buy_volume,
+                sell_volume=session.sell_volume,
+                bias=session.bias,
+                exchange_position=self.trading.get_open_position_size(self.symbol),
                 in_position=self.state.position is not None,
             )
         except Exception as exc:  # noqa: BLE001
             return LiveTickResult(success=False, error=str(exc))
-
-    def set_enabled(self, enabled: bool) -> None:
-        self.state.enabled = enabled
-        self._log("Strategy ENABLED" if enabled else "Strategy DISABLED")
-        self._save_state()

@@ -1,6 +1,6 @@
 # 15m Liquidity Grab + 1m Confirmation
 
-Backtests a 15-minute liquidity sweep with 1-minute two-candle reversal confirmation on **India Delta ETHUSD futures**. Candles are fetched live from `https://api.india.delta.exchange` on every run (no cache).
+Backtests a 15-minute liquidity sweep with 1-minute two-candle reversal confirmation on **India Delta ETHUSD futures**. Candles are fetched live from `https://api.india.delta.exchange` on every run (no cache). Live signals use that same India feed; orders default to the demo/testnet account.
 
 ## Strategy
 
@@ -41,14 +41,14 @@ Uses the same engine as the backtest. On each closed 1-minute bar it looks for a
 - Rests a reduce-only stop on the full 100 lots
 - After the 80% fill, moves the remaining 20 lots to breakeven and targets +90
 
-Put your India API key and secret in `.env`, then:
+Put demo API keys in `.env`. Candles stay on India live; orders go to `DELTA_BASE_URL` (demo/testnet by default):
 
 ```bash
 pip install -r requirements.txt
-# Scan only — no orders
+# Scan India-live candles only — no orders
 python scripts/run_live.py --loop
 
-# Real orders on your Delta account
+# Place orders on the demo account
 python scripts/run_live.py --live --loop
 ```
 
@@ -58,6 +58,6 @@ Alerts go to every address in `NOTIFY_EMAIL` (comma-separated) on buy/sell signa
 python scripts/run_live.py --test-email
 ```
 
-Create the API key on Delta with **trading** enabled. Start with `--loop` (dry-run) and confirm signals match the Streamlit backtest before using `--live`.
+Create the API key on [Delta demo](https://demo.delta.exchange/app/account/manageapikeys) with **trading** enabled and this machine's IP whitelisted. Start with `--loop` (dry-run) and confirm signals match the Streamlit backtest before using `--live`.
 
 For research and at your own risk. Past performance does not guarantee future results. Futures can lose more than your margin.

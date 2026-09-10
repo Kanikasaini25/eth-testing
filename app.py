@@ -10,30 +10,35 @@ if str(PROJECT_DIR) not in sys.path:
 import streamlit as st
 
 from src.backtest import BacktestParams, run_liquidity_backtest
-from src.config import get_env
-from src.delta_data import DeltaExchangeClient
+from src.config import get_env, get_market_data_base_url, get_trade_base_url
+from src.delta_data import fetch_closed_ohlcv
+from src.delta_trading import trade_network_label
 
-CANDLE_API_URL = "https://api.india.delta.exchange"
 WARMUP_DAYS = 2
 
 
 def load_ohlcv(symbol: str, resolution: str, days: int, status) -> list[dict]:
-    client = DeltaExchangeClient(base_url=CANDLE_API_URL)
+    data_url = get_market_data_base_url()
 
     def on_progress(fetched: float, total: int, res: str) -> None:
         status.info(
-            f"Fetching live {res} candles from Delta India ({fetched:.1f}/{total} days, no cache)…"
+            f"Fetching India-live {res} candles from {data_url} "
+            f"({fetched:.1f}/{total} days, same feed as live demo)…"
         )
 
-    return client.fetch_historical_ohlcv(
+    return fetch_closed_ohlcv(
         symbol=symbol,
         resolution=resolution,
         days=days,
         on_progress=on_progress,
+        base_url=data_url,
     )
 
 
 def sidebar_params() -> tuple[str, int, BacktestParams]:
+    st.sidebar.header("Market data")
+    st.sidebar.markdown("**India live** — same candles as the live demo runner")
+    st.sidebar.caption(get_market_data_base_url())
     st.sidebar.header("Backtest settings")
     symbol = st.sidebar.text_input("Symbol", value=get_env("DELTA_SYMBOL", "ETHUSD"))
     days = st.sidebar.select_slider(
@@ -249,11 +254,17 @@ def run_backtest(symbol: str, days: int, params: BacktestParams):
 def main() -> None:
     st.set_page_config(page_title="15m Liquidity Grab + 1m Confirmation", layout="wide")
     st.title("15-Minute Liquidity Grab + 1-Minute Confirmation")
+    data_url = get_market_data_base_url()
+    trade_url = get_trade_base_url()
     st.write(
-        "Fresh India Delta ETHUSD futures candles (no cache). "
+        "Backtest and live demo both read **India live** ETHUSD candles (no cache, closed bars only). "
         "A 15-minute candle must wick through a swing by at least 3 points and close back; "
         "then two 1-minute reversal candles confirm. Scale out 80% at +30 points and let "
         "20% run to +90 with the stop at breakeven."
+    )
+    st.caption(
+        f"Market data: **India live** `{data_url}` · "
+        f"Orders stay on **{trade_network_label(trade_url)}** `{trade_url}`"
     )
     symbol, days, params = sidebar_params()
     render_rules()
@@ -264,16 +275,26 @@ def main() -> None:
             st.error(f"Backtest failed: {exc}")
             return
         st.session_state["liq_result"] = result
-        st.session_state["liq_meta"] = (len(m15_rows), len(m1_rows), symbol, days)
+        st.session_state["liq_meta"] = (
+            len(m15_rows),
+            len(m1_rows),
+            symbol,
+            days,
+            get_market_data_base_url(),
+        )
 
     stored = st.session_state.get("liq_result")
     meta = st.session_state.get("liq_meta")
     if stored is None or meta is None:
         return
-    m15_count, m1_count, used_symbol, used_days = meta
+    if len(meta) == 5:
+        m15_count, m1_count, used_symbol, used_days, used_feed = meta
+    else:
+        m15_count, m1_count, used_symbol, used_days = meta[:4]
+        used_feed = get_market_data_base_url()
     st.success(
-        f"Last run: {used_symbol} on live India Delta · {used_days} day(s) · "
-        f"{m15_count} 15m candles · {m1_count} 1m candles · {stored.swing_count} swings"
+        f"Last run: {used_symbol} on India live `{used_feed}` · {used_days} day(s) · "
+        f"{m15_count} closed 15m · {m1_count} closed 1m · {stored.swing_count} swings"
     )
     render_metrics(stored)
     st.subheader("Equity curve")

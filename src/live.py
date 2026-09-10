@@ -6,12 +6,11 @@ from datetime import datetime, timezone
 
 from src.backtest import BacktestParams, BacktestResult, run_liquidity_backtest
 from src.config import LIVE_STATE_PATH
-from src.delta_data import DeltaExchangeClient, closed_ohlcv
+from src.delta_data import fetch_closed_ohlcv
 from src.delta_trading import DeltaTradingClient
 from src.email_notify import notify_event
 from src.strategy import EntrySignal
 
-CANDLE_API_URL = "https://api.india.delta.exchange"
 M15_DAYS = 5
 M1_DAYS = 3
 
@@ -167,19 +166,12 @@ class LiveGrabRunner:
     def __init__(self, params: BacktestParams | None = None, symbol: str = "ETHUSD") -> None:
         self.params = params or BacktestParams()
         self.symbol = symbol
-        self.candles = DeltaExchangeClient(base_url=CANDLE_API_URL)
         self.broker = DeltaTradingClient(symbol=symbol)
         self.state = load_state()
 
     def latest_signal(self) -> tuple[EntrySignal | None, str, BacktestResult | None]:
-        m15 = closed_ohlcv(
-            self.candles.fetch_historical_ohlcv(self.symbol, "15m", days=M15_DAYS),
-            "15m",
-        )
-        m1 = closed_ohlcv(
-            self.candles.fetch_historical_ohlcv(self.symbol, "1m", days=M1_DAYS),
-            "1m",
-        )
+        m15 = fetch_closed_ohlcv(self.symbol, "15m", days=M15_DAYS)
+        m1 = fetch_closed_ohlcv(self.symbol, "1m", days=M1_DAYS)
         signal, result, last_ts = scan_closed_bars(m15, m1, self.params)
         return signal, last_ts, result
 

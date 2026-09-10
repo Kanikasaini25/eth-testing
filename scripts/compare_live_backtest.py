@@ -10,8 +10,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 from src.backtest import run_liquidity_backtest
-from src.delta_data import DeltaExchangeClient, closed_ohlcv
-from src.live import CANDLE_API_URL, M15_DAYS, M1_DAYS, live_params, signal_on_last_bar
+from src.delta_data import closed_ohlcv, fetch_closed_ohlcv
+from src.live import M15_DAYS, M1_DAYS, live_params, signal_on_last_bar
 from src.swings import epoch_of
 
 
@@ -27,10 +27,9 @@ def _same(signal, expected) -> list[str]:
 
 def main() -> int:
     params = live_params()
-    client = DeltaExchangeClient(base_url=CANDLE_API_URL)
-    print(f"Fetching ETHUSD {M15_DAYS}d 15m + {M1_DAYS}d 1m (same window as live)…")
-    m15 = closed_ohlcv(client.fetch_historical_ohlcv("ETHUSD", "15m", days=M15_DAYS), "15m")
-    m1 = closed_ohlcv(client.fetch_historical_ohlcv("ETHUSD", "1m", days=M1_DAYS), "1m")
+    print(f"Fetching ETHUSD {M15_DAYS}d 15m + {M1_DAYS}d 1m (India live, same as backtest)…")
+    m15 = fetch_closed_ohlcv("ETHUSD", "15m", days=M15_DAYS)
+    m1 = fetch_closed_ohlcv("ETHUSD", "1m", days=M1_DAYS)
     print(f"Closed bars: {len(m15)} 15m · {len(m1)} 1m")
     print(f"Window: {m1[0]['timestamp']} → {m1[-1]['timestamp']}")
 

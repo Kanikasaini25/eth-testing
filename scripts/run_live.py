@@ -11,8 +11,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from src.config import get_env
-from src.delta_trading import DeltaTradingClient, is_testnet_url
+from src.config import get_env, get_market_data_base_url, get_trade_base_url
+from src.delta_trading import DeltaTradingClient, trade_network_label
 from src.email_notify import is_email_configured, send_test_email
 from src.live import LiveGrabRunner, live_params
 
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Place real orders. Without this flag the script only prints signals.",
+        help="Place orders on the demo/testnet account. Without this flag the script only prints signals.",
     )
     parser.add_argument("--loop", action="store_true", help="Keep scanning until Ctrl+C")
     parser.add_argument(
@@ -47,17 +47,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def print_account(symbol: str) -> None:
+def print_endpoints() -> None:
+    data_url = get_market_data_base_url()
+    trade_url = get_trade_base_url()
+    print(f"Market data: India live · {data_url}")
+    print(f"Orders: {trade_network_label(trade_url)} · {trade_url}")
+
+
+def print_account(symbol: str) -> bool:
     broker = DeltaTradingClient(symbol=symbol)
     snap = broker.test_connection()
-    net = "testnet" if is_testnet_url(snap.base_url) else "LIVE INDIA"
+    net = trade_network_label(snap.base_url)
     if not snap.connected:
         print(f"Account: not connected ({snap.error})")
-        return
+        if "ip_not_whitelisted" in (snap.error or ""):
+            print(
+                "Whitelist this machine's IP on the demo API key at "
+                "https://demo.delta.exchange/app/account/manageapikeys"
+            )
+        return False
     size = 0
     if snap.position:
         size = int(snap.position.get("size") or 0)
     print(f"Account: connected · {net} · {snap.symbol} · position {size} lots")
+    return True
 
 
 def main() -> int:
@@ -77,8 +90,9 @@ def main() -> int:
 
     print(
         "15m liquidity grab live runner · "
-        f"{'DRY-RUN (no orders)' if dry_run else 'LIVE ORDERS'} · {args.symbol}"
+        f"{'DRY-RUN (no orders)' if dry_run else 'DEMO ORDERS'} · {args.symbol}"
     )
+    print_endpoints()
     print(
         f"Rules: 100 lots default, 80% off at +{params.target_points:.0f}, "
         f"20% runner +{params.runner_target_points:.0f}, stop at grab extreme"
@@ -88,8 +102,9 @@ def main() -> int:
     else:
         print("Email alerts: off (set SMTP_* and NOTIFY_EMAIL in .env)")
     if not dry_run:
-        print_account(args.symbol.upper())
-        print("This places real futures orders. Ctrl+C to stop.")
+        if not print_account(args.symbol.upper()):
+            return 1
+        print("This places futures orders on the demo/testnet account. Ctrl+C to stop.")
 
     def run_tick() -> None:
         for line in runner.tick(dry_run=dry_run):

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from src.config import get_market_data_base_url
+
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
 
@@ -22,8 +24,8 @@ RESOLUTION_SECONDS: dict[str, int] = {
 
 
 class DeltaExchangeClient:
-    def __init__(self, base_url: str = "https://api.india.delta.exchange") -> None:
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = (base_url or get_market_data_base_url()).rstrip("/")
 
     def fetch_candles(
         self,
@@ -107,6 +109,24 @@ class DeltaExchangeClient:
             )
 
         return rows
+
+
+def fetch_closed_ohlcv(
+    symbol: str,
+    resolution: str,
+    days: int,
+    on_progress=None,
+    base_url: str | None = None,
+) -> list[dict]:
+    """India-live candles with the in-progress bar dropped (same feed as live and backtest)."""
+    client = DeltaExchangeClient(base_url=base_url)
+    rows = client.fetch_historical_ohlcv(
+        symbol=symbol,
+        resolution=resolution,
+        days=days,
+        on_progress=on_progress,
+    )
+    return closed_ohlcv(rows, resolution)
 
 
 def closed_ohlcv(

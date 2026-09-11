@@ -39,7 +39,7 @@ VERDICT_COLORS = {
 
 
 def _default_url() -> str:
-    urls = get_env("YOUTUBE_URLS")
+    urls = get_env("YOUTUBE_URLS") or get_env("YOUTUBE_URL")
     return urls.split(",")[0].strip() if urls else ""
 
 

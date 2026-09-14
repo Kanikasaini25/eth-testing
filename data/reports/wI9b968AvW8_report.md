@@ -52,6 +52,7 @@
       "After a full stop loss, another entry from the same line is allowed until 3 daily attempts are reached.",
       "After TP1 or TP2, the full position remains open while the stop locks the achieved R level.",
       "Never take more than 3 trades in one sequence.",
+      "If the confirmation candle breaks the signal entry level and also takes out the signal stop wick, skip the trade (no entry, no wait for a third candle).",
       "Backtest on ETH futures (e.g. ETHUSD on Delta Exchange)."
     ],
     "parameters": {
@@ -66,6 +67,7 @@
       "require_close_beyond_signal": false,
       "require_liquidity_sweep": true,
       "require_two_consecutive_confirmation_candles": true,
+      "skip_if_confirmation_hits_signal_stop": true,
       "use_daily_trend_filter": false,
       "use_session_filter": true,
       "session_start_hour_delta": 0,
@@ -100,7 +102,7 @@ _Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. The backtest 
 
 | Technique | Trades | Win Rate | Strategy Return | Buy & Hold | Max Drawdown | Verdict |
 |-----------|--------|----------|-----------------|------------|--------------|---------|
-| LQDTY Liquidity Strategy | 36 | 16.67% | 2.81% | 34.55% | 0.68% | Mixed |
+| LQDTY Liquidity Strategy | 46 | 15.22% | 2.74% | 32.25% | 0.88% | Mixed |
 
 ## Backtest Mode
 
@@ -130,6 +132,7 @@ _Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. The backtest 
 - Skips Middle Zone Without Touch: **Yes**
 - Instrument Eth Futures: **Yes**
 - Requires Liquidity Sweep Rejection: **Yes**
+- Skips If Confirmation Hits Signal Stop: **Yes**
 - Uses Daily Trend Filter: **No**
 - Uses Delta India Session Filter: **Yes**
 - Simulates Trading Fees: **Yes**
@@ -177,6 +180,16 @@ _Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. The backtest 
 | 2026-09-02 09:34 UTC | 2026-09-02 09:44 UTC | 2374.45 | 2368.0 | -6.45 | $-8.82 | stop_loss |
 | 2026-09-03 13:35 UTC | 2026-09-03 13:40 UTC | 2425.15 | 2432.35 | -7.2 | $-9.63 | stop_loss |
 | 2026-09-03 13:46 UTC | 2026-09-03 14:11 UTC | 2430.05 | 2435.5 | -5.45 | $-7.88 | stop_loss |
+| 2026-09-04 08:56 UTC | 2026-09-04 09:02 UTC | 2524.95 | 2528.6 | -3.65 | $-6.18 | stop_loss |
+| 2026-09-04 09:07 UTC | 2026-09-04 09:11 UTC | 2529.0 | 2530.25 | -1.25 | $-3.78 | stop_loss |
+| 2026-09-06 01:10 UTC | 2026-09-06 01:13 UTC | 2493.8 | 2496.4 | -2.6 | $-5.10 | stop_loss |
+| 2026-09-06 01:15 UTC | 2026-09-06 01:36 UTC | 2495.9 | 2498.5 | -2.6 | $-5.10 | stop_loss |
+| 2026-09-07 02:45 UTC | 2026-09-08 14:12 UTC | 2525.5 | 2474.99 | 50.51 | $+48.01 | stop_at_2pct |
+| 2026-09-08 14:24 UTC | 2026-09-08 14:34 UTC | 2477.7 | 2480.35 | -2.65 | $-5.13 | stop_loss |
+| 2026-09-09 04:46 UTC | 2026-09-09 07:07 UTC | 2505.7 | 2513.25 | -7.55 | $-10.06 | stop_loss |
+| 2026-09-09 07:14 UTC | 2026-09-09 07:28 UTC | 2510.0 | 2513.45 | -3.45 | $-5.96 | stop_loss |
+| 2026-09-10 12:49 UTC | 2026-09-10 12:53 UTC | 2425.05 | 2420.15 | -4.9 | $-7.32 | stop_loss |
+| 2026-09-10 12:57 UTC | 2026-09-10 13:12 UTC | 2414.2 | 2409.8 | -4.4 | $-6.81 | stop_loss |
 
 ## Transcript Excerpt
 

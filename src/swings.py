@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 
 M15_SECONDS = 900
 
 
+@lru_cache(maxsize=None)
 def epoch_of(timestamp: str) -> float:
     return datetime.fromisoformat(timestamp).timestamp()
 
@@ -22,10 +25,13 @@ class SwingPoint:
     m15_index: int
     timestamp: str
     confirm_index: int
+    swing_id: str = ""
 
-    @property
-    def swing_id(self) -> str:
-        return f"{self.kind}:{self.m15_index}:{self.timestamp}"
+    def __post_init__(self) -> None:
+        if not self.swing_id:
+            object.__setattr__(
+                self, "swing_id", f"{self.kind}:{self.m15_index}:{self.timestamp}"
+            )
 
 
 def _is_strict_pivot(values: list[float], index: int, left: int, right: int, want_max: bool) -> bool:
@@ -73,13 +79,15 @@ def usable_swings(
     swept_ids: set[str],
 ) -> list[SwingPoint]:
     oldest = last_closed_index - lookback
+    # swings are emitted in ascending m15_index, so skip straight to the window
+    start = bisect_left(swings, oldest, key=lambda swing: swing.m15_index)
     result: list[SwingPoint] = []
-    for swing in swings:
-        if swing.swing_id in swept_ids:
-            continue
+    for swing in swings[start:]:
+        if swing.m15_index > last_closed_index:
+            break
         if swing.confirm_index > last_closed_index:
             continue
-        if swing.m15_index < oldest:
+        if swing.swing_id in swept_ids:
             continue
         result.append(swing)
     return result

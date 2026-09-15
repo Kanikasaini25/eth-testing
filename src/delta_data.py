@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
 
 from src.config import get_market_data_base_url
+from src.timezone import epoch_to_ist_iso
 
 CANDLES_PER_REQUEST = 2000
 SECONDS_PER_DAY = 86400
@@ -62,9 +63,14 @@ class DeltaExchangeClient:
         resolution: str = "1d",
         days: int = 30,
         on_progress=None,
+        start: int | None = None,
+        end: int | None = None,
     ) -> list[dict]:
-        end = int(time.time())
-        start = end - (days * SECONDS_PER_DAY)
+        end = int(time.time()) if end is None else int(end)
+        start = end - (days * SECONDS_PER_DAY) if start is None else int(start)
+        if start >= end:
+            raise ValueError("Start must be before end")
+        days = max((end - start) / SECONDS_PER_DAY, 1)
         seconds_per_candle = RESOLUTION_SECONDS.get(resolution, SECONDS_PER_DAY)
         chunk_seconds = CANDLES_PER_REQUEST * seconds_per_candle
 
@@ -99,7 +105,7 @@ class DeltaExchangeClient:
             seen.add(ts)
             rows.append(
                 {
-                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                    "timestamp": epoch_to_ist_iso(ts),
                     "open": float(candle["open"]),
                     "high": float(candle["high"]),
                     "low": float(candle["low"]),
@@ -114,17 +120,24 @@ class DeltaExchangeClient:
 def fetch_closed_ohlcv(
     symbol: str,
     resolution: str,
-    days: int,
+    days: int = 30,
     on_progress=None,
     base_url: str | None = None,
+    start: int | None = None,
+    end: int | None = None,
 ) -> list[dict]:
-    """India-live candles with the in-progress bar dropped (same feed as live and backtest)."""
+    """India-live candles with the in-progress bar dropped (same feed as live and backtest).
+
+    Pass start/end epochs for an explicit window, otherwise the last `days` are used.
+    """
     client = DeltaExchangeClient(base_url=base_url)
     rows = client.fetch_historical_ohlcv(
         symbol=symbol,
         resolution=resolution,
         days=days,
         on_progress=on_progress,
+        start=start,
+        end=end,
     )
     return closed_ohlcv(rows, resolution)
 

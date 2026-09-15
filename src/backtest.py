@@ -21,7 +21,9 @@ from src.swings import (
 
 @dataclass
 class BacktestParams:
-    target_points: float = 30.0
+    """Defaults are the tuned strategy from scripts/optimize.py — see src/presets.py."""
+
+    target_points: float = 10.0
     position_lots: int = 100
     fee_pct_per_side: float = 0.05
     fee_maker_pct: float = 0.02
@@ -30,25 +32,28 @@ class BacktestParams:
     scalper_offer: bool = False
     scalper_minutes: float = 30.0
     gst_pct: float = 0.0
+    slippage_points: float = 0.0
     starting_wallet_usd: float = 10000.0
     usd_per_point_per_lot: float = 0.01
-    swing_left: int = 2
+    swing_left: int = 4
     swing_right: int = 2
     swing_lookback: int = 48
-    confirm_timeout_minutes: int = 90
-    sl_buffer_points: float = 1.0
+    confirm_timeout_minutes: int = 120
+    sl_buffer_points: float = 0.5
     use_stop_loss: bool = True
-    max_sl_points: float = 15.0
-    min_sweep_points: float = 3.0
+    max_sl_points: float = 35.0
+    min_sweep_points: float = 1.0
     require_reclaim: bool = True
-    require_close_back: bool = True
+    require_close_back: bool = False
     grab_on_m15_close: bool = True
-    min_confirm_body: float = 1.5
+    min_confirm_body: float = 1.0
     require_close_break: bool = False
     one_shot_confirm: bool = False
     breakeven_points: float = 0.0
-    partial_exit_pct: float = 80.0
-    runner_target_points: float = 90.0
+    partial_exit_pct: float = 0.0
+    runner_target_points: float = 30.0
+    # 0 disables. Closing inside scalper_minutes waives the exchange's closing fee.
+    max_hold_minutes: float = 0.0
 
 
 @dataclass
@@ -214,7 +219,8 @@ def _close_trade(
     wallet: float,
     params: BacktestParams,
 ) -> tuple[dict, float]:
-    points = _points(position.side, position.entry_price, exit_price)
+    # slippage covers both legs, so charge it once against the realised move
+    points = _points(position.side, position.entry_price, exit_price) - params.slippage_points
     size = position.lots * params.usd_per_point_per_lot
     hold = _hold_minutes(position.entry_ts, exit_ts)
     entry_fee, exit_fee, scalped = _fee_parts(
@@ -301,6 +307,14 @@ def _manage_open(
     maybe_move_to_breakeven(position, bar, params.breakeven_points)
     exit_hit = check_bar_exit(position, bar)
     if exit_hit is None:
+        if params.max_hold_minutes > 0 and (
+            _hold_minutes(position.entry_ts, bar["timestamp"]) >= params.max_hold_minutes
+        ):
+            label = "time_exit" if not position.partial_taken else "runner_time_exit"
+            trade, wallet = _close_trade(
+                position, bar["timestamp"], float(bar["close"]), label, wallet, params
+            )
+            return None, [trade], wallet
         return position, [], wallet
     reason, exit_price = exit_hit
     closed = _scale_out_lots(position.lots, params.partial_exit_pct)

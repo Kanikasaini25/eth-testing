@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, replace
 
 from src.backtest import BacktestParams, BacktestResult, run_liquidity_backtest
 from src.config import LIVE_STATE_PATH
 from src.delta_data import fetch_closed_ohlcv
 from src.delta_trading import DeltaTradingClient
 from src.email_notify import notify_event
+from src.presets import STRATEGY
 from src.strategy import EntrySignal
+from src.timezone import ist_display, now_ist_display
 
 M15_DAYS = 5
 M1_DAYS = 3
 
 
 def live_params(lots: int = 100) -> BacktestParams:
-    """Same defaults as the Streamlit backtest sidebar."""
-    return BacktestParams(position_lots=lots, scalper_offer=True)
+    """Same tuned configuration the Streamlit backtest runs, so live matches the report."""
+    return replace(STRATEGY, position_lots=lots)
 
 
 def signal_on_last_bar(
@@ -43,23 +44,24 @@ def scan_closed_bars(
     return signal, result, last_ts
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def _now_ist() -> str:
+    return now_ist_display()
 
 
 def _status_log(last_ts: str, result: BacktestResult | None) -> str:
+    last_ts = ist_display(last_ts)
     if result is None:
-        return f"{_utc_now()} | last 1m {last_ts} | no data"
+        return f"{_now_ist()} | last 1m {last_ts} | no data"
     grab = "no grab"
     if result.pending_side:
         level = "low" if result.pending_side == "long" else "high"
         wick = "lower" if result.pending_side == "long" else "upper"
         grab = (
             f"GRAB {result.pending_side} | marked swing {level} {result.pending_swing:.2f} | "
-            f"wick {wick} {result.pending_sweep:.2f} @ {result.pending_grab_ts}"
+            f"wick {wick} {result.pending_sweep:.2f} @ {ist_display(result.pending_grab_ts)}"
         )
     return (
-        f"{_utc_now()} | last 1m {last_ts} close {result.last_close:.2f} | "
+        f"{_now_ist()} | last 1m {last_ts} close {result.last_close:.2f} | "
         f"marked high {result.marked_high:.2f} | marked low {result.marked_low:.2f} | {grab}"
     )
 
@@ -82,9 +84,9 @@ def _order_log_lines(
     swing_name = "swing low (marked)" if signal.side == "long" else "swing high (marked)"
     wick_name = "grab wick lower" if signal.side == "long" else "grab wick upper"
     lines = [
-        f"{_utc_now()} | {mode} ORDER {trade} {lots} lots",
-        f"  Order time:         {signal.entry_ts}",
-        f"  Grab time:          {signal.grab_ts}",
+        f"{_now_ist()} | {mode} ORDER {trade} {lots} lots",
+        f"  Order time:         {ist_display(signal.entry_ts)} IST",
+        f"  Grab time:          {ist_display(signal.grab_ts)} IST",
         f"  {swing_name}: {signal.swing_price:.2f}",
         f"  {wick_name}:   {signal.sweep_extreme:.2f}",
         f"  1m confirm high/low: {signal.first_high:.2f} / {signal.first_low:.2f}",
@@ -282,7 +284,7 @@ class LiveGrabRunner:
             side_label = "BUY/LONG" if prev.side == "long" else "SELL/SHORT" if prev.side else "FLAT"
             kind = "runner close" if prev.stage == "runner" else "position close"
             msg = (
-                f"{_utc_now()} | position closed | {side_label} entry {prev.entry_price:.2f} "
+                f"{_now_ist()} | position closed | {side_label} entry {prev.entry_price:.2f} "
                 f"stop {prev.stop_loss:.2f} target {prev.target:.2f}"
             )
             mail = _notify(
@@ -313,7 +315,7 @@ class LiveGrabRunner:
             save_state(self.state)
             trade = "BUY" if self.state.side == "long" else "SELL"
             msg = (
-                f"{_utc_now()} | 80% TP filled @ {self.state.target:.2f} | "
+                f"{_now_ist()} | 80% TP filled @ {self.state.target:.2f} | "
                 f"runner {self.state.runner_lots} lots | BE stop {be:.2f} | "
                 f"runner TP {self.state.runner_target:.2f}"
             )

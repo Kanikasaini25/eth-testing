@@ -12,6 +12,8 @@ import streamlit as st
 from src.config import get_env, get_market_data_base_url, get_trade_base_url
 from src.delta_trading import DeltaTradingClient, trade_network_label
 from src.live import LiveGrabRunner, live_params
+from src.presets import SUMMARY
+from src.timezone import IST_LABEL
 
 
 def _account_status(symbol: str) -> tuple[bool, str]:
@@ -42,10 +44,11 @@ def main() -> None:
         "Filled orders go to the **demo/testnet** account."
     )
     st.caption(f"Market data `{data_url}`")
-    st.caption(f"Orders `{trade_url}` ({trade_network_label(trade_url)})")
+    st.caption(f"Orders `{trade_url}` ({trade_network_label(trade_url)}) · times in {IST_LABEL}")
 
     symbol = st.sidebar.text_input("Symbol", value=get_env("DELTA_SYMBOL", "ETHUSD")).strip().upper()
     lots = st.sidebar.number_input("Trade size (lots)", min_value=1, value=100, step=1)
+    st.sidebar.caption(SUMMARY)
     runner = LiveGrabRunner(params=live_params(lots=int(lots)), symbol=symbol)
 
     connected, account_line = _account_status(symbol)

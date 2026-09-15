@@ -27,15 +27,27 @@ RESOLUTION_SECONDS: dict[str, int] = {
 }
 
 
+def bar_seconds(resolution: str) -> int:
+    return RESOLUTION_SECONDS.get(resolution, 60)
+
+
+def candles_per_day(resolution: str) -> int:
+    return SECONDS_PER_DAY // bar_seconds(resolution)
+
+
+def expected_intraday_candles(days: int, resolution: str = "1m") -> int:
+    return max(days, 0) * candles_per_day(resolution)
+
+
 def expected_1m_candles(days: int) -> int:
     """One trading day on 1m timeframe = 1440 candles (24 × 60)."""
-    return max(days, 0) * CANDLES_PER_DAY_1M
+    return expected_intraday_candles(days, "1m")
 
 
 def trim_ohlcv_to_days(rows: list[dict], days: int, resolution: str = "1m") -> list[dict]:
-    if not rows or resolution != "1m":
+    if not rows:
         return rows
-    expected = expected_1m_candles(days)
+    expected = expected_intraday_candles(days, resolution)
     if len(rows) > expected:
         return rows[-expected:]
     return rows
@@ -159,6 +171,23 @@ class DeltaExchangeClient:
         if mark_price is None:
             raise RuntimeError(f"Could not fetch mark price for {symbol} from {self.base_url}")
         return float(mark_price)
+
+    def fetch_public_trades(self, symbol: str) -> list[dict]:
+        """Recent public trades. Aggressive side is the taker (buyer_role/seller_role)."""
+        response = self.http_client.get(
+            f"{self.base_url}/v2/trades/{symbol}",
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("success"):
+            raise RuntimeError(f"Delta Exchange trades error: {payload}")
+        result = payload.get("result")
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return list(result.get("trades") or [])
+        return []
 
 
 def save_ohlcv(rows: list[dict], path: str) -> None:

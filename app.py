@@ -68,6 +68,10 @@ def _format_usd(amount: float) -> str:
     return f"${amount:+,.2f}"
 
 
+def _flow_count(trade: object, field: str) -> int:
+    return int(round(float(getattr(trade, field, 0) or 0)))
+
+
 def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
     rows: list[dict] = []
     for trade in result.trades:
@@ -81,6 +85,8 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
                 "Exit": trade.exit_date,
                 "Entry Price": trade.entry_price,
                 "Exit Price": trade.exit_price,
+                "Buyers": _flow_count(trade, "buyers"),
+                "Sellers": _flow_count(trade, "sellers"),
                 "Entry Lots": trade.entry_lots,
                 "Exit Lots": trade.lots,
                 "Points": trade.points,
@@ -88,9 +94,7 @@ def _trades_table(result: BacktestResult, starting_wallet: float) -> list[dict]:
                 "Net P/L ($)": _format_usd(pnl_usd),
                 "P/L (lot-pts) (gross)": lot_points,
                 "Price Return % (gross)": trade.return_pct,
-                "Initial SL (profit trade)": (
-                    f"{trade.stop_loss:.2f}" if trade.points > 0 else "—"
-                ),
+                "Initial SL": f"{trade.stop_loss:.2f}" if trade.stop_loss else "—",
                 "Wallet": _format_usd(trade.wallet_balance),
                 "Exit Reason": trade.exit_reason,
             }
@@ -110,6 +114,8 @@ def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, 
             wins += 1
         elif trade.pnl_usd < 0:
             losses += 1
+    total_buyers = sum(_flow_count(trade, "buyers") for trade in result.trades)
+    total_sellers = sum(_flow_count(trade, "sellers") for trade in result.trades)
     return {
         "total_lot_points": round(total_lot_points, 2),
         "total_gross_usd": round(total_gross_usd, 2),
@@ -119,6 +125,8 @@ def _trades_totals(result: BacktestResult, starting_wallet: float) -> dict[str, 
         "wins": wins,
         "losses": losses,
         "exits": len(result.trades),
+        "total_buyers": total_buyers,
+        "total_sellers": total_sellers,
     }
 
 
@@ -132,8 +140,10 @@ def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> 
             "Trade": "TOTAL",
             "Entry": "",
             "Exit": "",
-            "Entry Price": "",
-            "Exit Price": "",
+            "Entry Price": None,
+            "Exit Price": None,
+            "Buyers": int(totals["total_buyers"]),
+            "Sellers": int(totals["total_sellers"]),
             "Entry Lots": "",
             "Exit Lots": "",
             "Points": "",
@@ -141,7 +151,7 @@ def _trades_table_with_total(result: BacktestResult, starting_wallet: float) -> 
             "Net P/L ($)": _format_usd(totals["net_usd"]),
             "P/L (lot-pts) (gross)": totals["total_lot_points"],
             "Price Return % (gross)": "",
-            "Initial SL (profit trade)": "",
+            "Initial SL": "",
             "Wallet": _format_usd(totals["final_wallet"]),
             "Exit Reason": "",
         }

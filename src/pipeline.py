@@ -14,7 +14,6 @@ from src.config import (
 )
 from src.delta_data import (
     DeltaExchangeClient,
-    expected_1m_candles,
     save_ohlcv,
     trim_ohlcv_to_days,
 )
@@ -125,6 +124,9 @@ def run_pipeline(
             "No supported trading techniques found in transcript. "
             "The video should mention MACD, moving average crossover, or breakout."
         )
+    for rule in rules:
+        if rule.strategy_type == "liquidity":
+            rule.parameters["entry_timeframe"] = "1m"
     rules_json = rules_to_json(rules)
     rules_path.write_text(rules_json, encoding="utf-8")
 

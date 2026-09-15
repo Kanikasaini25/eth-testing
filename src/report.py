@@ -33,7 +33,7 @@ def generate_report(
         "",
         "## Backtest Results",
         "",
-        "_Note: LQDTY liquidity rules use 1D setup + 1M entry in the video. "
+        "_Note: LQDTY liquidity rules use 1D setup + 1M entry. "
         "The backtest below is a daily ETH approximation only._",
         "",
         "| Technique | Trades | Win Rate | Strategy Return | Buy & Hold | Max Drawdown | Verdict |",
@@ -74,14 +74,16 @@ def generate_report(
 
         lines.extend(
             [
-                "| Entry | Exit | Entry Price | Exit Price | Points | P/L ($) | Reason |",
-                "|-------|------|-------------|------------|--------|---------|--------|",
+                "| Entry | Exit | Entry Price | Exit Price | Buyers | Sellers | Points | P/L ($) | Reason |",
+                "|-------|------|-------------|------------|--------|---------|--------|---------|--------|",
             ]
         )
         for trade in result.trades:
             lines.append(
                 f"| {trade.entry_date} | {trade.exit_date} | {trade.entry_price} | "
-                f"{trade.exit_price} | {trade.points} | ${trade.pnl_usd:+.2f} | {trade.exit_reason} |"
+                f"{trade.exit_price} | {int(round(getattr(trade, 'buyers', 0)))} | "
+                f"{int(round(getattr(trade, 'sellers', 0)))} | {trade.points} | "
+                f"${trade.pnl_usd:+.2f} | {trade.exit_reason} |"
             )
         lines.append("")
 

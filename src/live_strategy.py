@@ -8,12 +8,17 @@ from typing import Any
 
 from src.backtest import (
     FIXED_ENTRY_LOTS,
-    _daily_liquidity_levels,
+    _breaks_opposing_candle,
+    _liquidity_levels_from_intraday,
     _liquidity_sweep_at_lower,
     _liquidity_sweep_at_upper,
     _liquidity_targets,
     _passes_liquidity_entry_filters,
+    _power_entry_price,
+    _latest_rejection_wick_stop,
     _signal_body_ratio,
+    _with_opposing_level,
+    reentry_after_profitable_close,
 )
 from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs, get_env
 from src.delta_data import DeltaExchangeClient
@@ -26,6 +31,12 @@ from src.email_notify import (
     send_partial_exit_email,
     send_runner_exit_email,
     send_stop_loss_email,
+)
+from src.order_flow import (
+    evaluate_liquidity_order_flow,
+    normalize_public_trade,
+    order_flow_params_from_dict,
+    snapshot_for_bar_tail,
 )
 from src.rule_extractor import TradingRule, rules_from_json
 from src.timezone import delta_candle_day, format_delta_timestamp
@@ -153,6 +164,8 @@ class LiveLiquidityRunner:
         self.rule = rule or load_liquidity_rule(rules_path)
         self.state_path = state_path or LIVE_STATE_DIR / f"{self.symbol}_live_state.json"
         self.state = self._load_state()
+        self.rule.parameters["entry_timeframe"] = "1m"
+        self._recent_trades: list[dict] = []
 
     def _load_state(self) -> LiveStrategyState:
         if not self.state_path.exists():
@@ -209,6 +222,84 @@ class LiveLiquidityRunner:
     def _params(self) -> dict[str, Any]:
         return self.rule.parameters
 
+    def _refresh_public_trades(self) -> None:
+        raw_trades = self.data.fetch_public_trades(self.symbol)
+        merged = {self._trade_key(item): item for item in self._recent_trades}
+        for raw in raw_trades:
+            normalized = normalize_public_trade(raw)
+            if normalized is None:
+                continue
+            merged[self._trade_key(normalized)] = normalized
+        cutoff = datetime.now(timezone.utc).timestamp() - 300
+        self._recent_trades = [
+            trade for trade in merged.values() if trade["timestamp"] >= cutoff
+        ]
+
+    @staticmethod
+    def _trade_key(trade: dict) -> tuple:
+        return (trade["timestamp"], trade["side"], trade["size"], trade.get("price", 0))
+
+    @staticmethod
+    def _bar_index(bars: list[dict], timestamp: str) -> int:
+        for index, row in enumerate(bars):
+            if row["timestamp"] == timestamp:
+                return index
+        return -1
+
+    def _signal_with_opposing(
+        self,
+        signal: dict,
+        bars: list[dict],
+        side: str,
+        lookback: int,
+    ) -> dict:
+        index = self._bar_index(bars, str(signal.get("index_ts", "")))
+        if index < 0:
+            index = len(bars) - 1
+        return _with_opposing_level(signal, bars, index, side, lookback)
+
+    def _opposing_ready(
+        self,
+        signal: dict,
+        bars: list[dict],
+        side: str,
+        lookback: int,
+    ) -> dict:
+        if signal.get("opposing_high") and signal.get("opposing_low"):
+            return signal
+        return self._signal_with_opposing(signal, bars, side, lookback)
+
+    def _order_flow_allows(
+        self,
+        side: str,
+        bars: list[dict],
+        signal: dict,
+        entry_ts: str,
+    ) -> tuple[bool, str]:
+        params = order_flow_params_from_dict(self._params())
+        signal_index = self._bar_index(bars, str(signal.get("index_ts", "")))
+        entry_index = self._bar_index(bars, entry_ts)
+        if entry_index < 0:
+            entry_index = len(bars) - 1
+        if signal_index < 0:
+            signal_index = max(0, entry_index - 1)
+        entry_snapshot = None
+        if self._recent_trades and entry_index >= 0:
+            entry_snapshot = snapshot_for_bar_tail(
+                bars[entry_index],
+                self._recent_trades,
+                params.entry_window_seconds,
+            )
+        return evaluate_liquidity_order_flow(
+            side=side,
+            bars=bars,
+            signal_index=signal_index,
+            entry_index=entry_index,
+            params=params,
+            is_reentry=bool(self.state.session.reentry_side),
+            entry_snapshot=entry_snapshot,
+        )
+
     def _reset_session_if_new_day(self, day: str) -> None:
         session = self.state.session
         if session.day == day:
@@ -236,12 +327,20 @@ class LiveLiquidityRunner:
         self,
         daily_rows: list[dict],
         day: str,
+        intraday_rows: list[dict] | None = None,
     ) -> tuple[float | None, float | None]:
-        levels = _daily_liquidity_levels(daily_rows)
+        levels = _liquidity_levels_from_intraday(intraday_rows or [], daily_rows)
         day_levels = levels.get(day)
         if not day_levels:
             return None, None
         return day_levels["upper"], day_levels["lower"]
+
+    def _arm_reentry_if_same_day(self, position: LivePositionState) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.state.session.reentry_side = reentry_after_profitable_close(
+            position.entry_ts, now, position.side
+        )
+        self.state.session.reentry_pullback_seen = False
 
     def _fetch_market_data(self) -> tuple[list[dict], list[dict]]:
         daily_rows = self.data.fetch_historical_ohlcv(
@@ -597,8 +696,7 @@ class LiveLiquidityRunner:
         session = self.state.session
         # Match backtest: full SL rearms the line; partial/TP path enables reentry.
         if was_partial:
-            session.reentry_side = side
-            session.reentry_pullback_seen = False
+            self._arm_reentry_if_same_day(position)
         else:
             session.full_sl_count += 1
             if entry_line == "upper":
@@ -654,8 +752,7 @@ class LiveLiquidityRunner:
         if favorable >= signed_targets[3]:
             self.trading.cancel_open_orders(symbol=self.symbol)
             self.trading.close_position_at_market(symbol=self.symbol)
-            self.state.session.reentry_side = position.side
-            self.state.session.reentry_pullback_seen = False
+            self._arm_reentry_if_same_day(position)
             self.state.position = None
             action = f"TAKE PROFIT (+5%) — closed {position.entry_lots} lots @ ~{mark_price:.2f}"
             self._log(action)
@@ -676,8 +773,7 @@ class LiveLiquidityRunner:
             )
             if stop_hit:
                 if position.target_stage > 0:
-                    self.state.session.reentry_side = position.side
-                    self.state.session.reentry_pullback_seen = False
+                    self._arm_reentry_if_same_day(position)
                 else:
                     if position.entry_line == "upper":
                         self.state.session.upper_rearmed = True
@@ -694,6 +790,7 @@ class LiveLiquidityRunner:
         daily_rows: list[dict],
         upper: float,
         lower: float,
+        bars: list[dict],
     ) -> list[str]:
         if self.state.position is not None:
             return []
@@ -710,6 +807,12 @@ class LiveLiquidityRunner:
         require_liquidity_sweep = bool(params.get("require_liquidity_sweep", True))
         skip_if_confirmation_hits_signal_stop = bool(
             params.get("skip_if_confirmation_hits_signal_stop", False)
+        )
+        require_break_opposing_candle = bool(
+            params.get("require_break_opposing_candle", True)
+        )
+        opposing_candle_lookback_bars = int(
+            params.get("opposing_candle_lookback_bars", 60)
         )
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
         use_session_filter = bool(params.get("use_session_filter", False))
@@ -780,41 +883,69 @@ class LiveLiquidityRunner:
         )
         if session.rejection_red and timestamp > session.rejection_red["index_ts"]:
             if close < open_price:
-                session.pending_red = {"high": high, "low": low, "close": close, "index_ts": timestamp}
+                session.pending_red = self._signal_with_opposing(
+                    {"high": high, "low": low, "close": close, "index_ts": timestamp},
+                    bars,
+                    "short",
+                    opposing_candle_lookback_bars,
+                )
             session.rejection_red = None
         if session.rejection_green and timestamp > session.rejection_green["index_ts"]:
             if close > open_price:
-                session.pending_green = {"high": high, "low": low, "close": close, "index_ts": timestamp}
+                session.pending_green = self._signal_with_opposing(
+                    {"high": high, "low": low, "close": close, "index_ts": timestamp},
+                    bars,
+                    "long",
+                    opposing_candle_lookback_bars,
+                )
             session.rejection_green = None
 
         pending_red = session.pending_red
         if pending_red and timestamp > pending_red["index_ts"]:
-            # Match backtest: clear pending only when confirmation fails; keep it
-            # when triggered so filters / entry can retry on later bars.
-            if close < open_price and low < pending_red["low"]:
-                short_triggered = True
-            else:
+            pending_red = self._opposing_ready(
+                pending_red, bars, "short", opposing_candle_lookback_bars
+            )
+            session.pending_red = pending_red
+            short_triggered = close < open_price and low < pending_red["low"]
+            if (
+                short_triggered
+                and require_break_opposing_candle
+                and not _breaks_opposing_candle("short", high, low, close, pending_red)
+            ):
                 short_triggered = False
                 session.pending_red = None
+                msg = (
+                    f"SKIP SHORT: sellers have not closed below rally low "
+                    f"({float(pending_red.get('opposing_low') or 0):.2f})"
+                )
+                self._log(msg)
+                actions.append(msg)
+            elif not short_triggered:
+                session.pending_red = None
             if short_triggered:
-                # Confirmation also took out signal SL high → cancel setup, no entry.
+                stop_loss = _latest_rejection_wick_stop("short", pending_red)
+                # Confirmation also took out the rejection-wick SL → cancel setup.
                 if (
                     skip_if_confirmation_hits_signal_stop
-                    and high >= pending_red["high"]
+                    and high >= stop_loss
                 ):
                     session.pending_red = None
                     session.rejection_red = None
                     msg = (
-                        f"SKIP SHORT: confirmation hit signal SL high "
-                        f"({pending_red['high']:.2f})"
+                        f"SKIP SHORT: confirmation hit rejection-wick SL "
+                        f"({stop_loss:.2f})"
                     )
                     self._log(msg)
                     actions.append(msg)
                 elif session.upper_entries_today >= max_entries_per_line:
                     session.pending_red = None
                 else:
-                    entry_price = close if require_close_beyond_signal else pending_red["low"]
-                    stop_loss = pending_red["high"]
+                    entry_price = _power_entry_price(
+                        "short",
+                        pending_red,
+                        close,
+                        require_close_beyond_signal,
+                    )
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "short", entry_price, stop_loss
                     )
@@ -841,56 +972,85 @@ class LiveLiquidityRunner:
                         and target_1 > 0
                         and entry_price > target_1
                     ):
-                        actions.extend(
-                            self._execute_entry(
-                                "short",
-                                entry_price,
-                                stop_loss,
-                                target_1,
-                                target_2,
-                                target_3,
-                                target_4,
-                                risk,
-                                "upper",
-                                timestamp,
-                            )
+                        flow_ok, flow_reason = self._order_flow_allows(
+                            "short", bars, signal, timestamp
                         )
-                        if self.state.position is not None:
-                            session.trades_in_sequence += 1
-                            session.upper_entries_today += 1
+                        if not flow_ok:
                             session.pending_red = None
                             session.rejection_red = None
-                            entered_this_bar = True
-                            session.upper_rearmed = False
-                            session.reentry_side = ""
-                            session.reentry_pullback_seen = False
+                            self._log(flow_reason)
+                            actions.append(flow_reason)
+                        else:
+                            actions.extend(
+                                self._execute_entry(
+                                    "short",
+                                    entry_price,
+                                    stop_loss,
+                                    target_1,
+                                    target_2,
+                                    target_3,
+                                    target_4,
+                                    risk,
+                                    "upper",
+                                    timestamp,
+                                )
+                            )
+                            if self.state.position is not None:
+                                session.trades_in_sequence += 1
+                                session.upper_entries_today += 1
+                                session.pending_red = None
+                                session.rejection_red = None
+                                entered_this_bar = True
+                                session.upper_rearmed = False
+                                session.reentry_side = ""
+                                session.reentry_pullback_seen = False
 
         pending_green = session.pending_green
         if pending_green and timestamp > pending_green["index_ts"]:
-            if close > open_price and high > pending_green["high"]:
-                long_triggered = True
-            else:
+            pending_green = self._opposing_ready(
+                pending_green, bars, "long", opposing_candle_lookback_bars
+            )
+            session.pending_green = pending_green
+            long_triggered = close > open_price and high > pending_green["high"]
+            if (
+                long_triggered
+                and require_break_opposing_candle
+                and not _breaks_opposing_candle("long", high, low, close, pending_green)
+            ):
                 long_triggered = False
                 session.pending_green = None
+                msg = (
+                    f"SKIP LONG: buyers have not closed above dump high "
+                    f"({float(pending_green.get('opposing_high') or 0):.2f})"
+                )
+                self._log(msg)
+                actions.append(msg)
+            elif not long_triggered:
+                session.pending_green = None
             if long_triggered:
-                # Confirmation also took out signal SL low → cancel setup, no entry.
+                stop_loss = _latest_rejection_wick_stop("long", pending_green)
+                # Confirmation also took out the rejection-wick SL → cancel setup.
                 if (
                     skip_if_confirmation_hits_signal_stop
-                    and low <= pending_green["low"]
+                    and low <= stop_loss
                 ):
                     session.pending_green = None
                     session.rejection_green = None
                     msg = (
-                        f"SKIP LONG: confirmation hit signal SL low "
-                        f"({pending_green['low']:.2f})"
+                        f"SKIP LONG: confirmation hit rejection-wick SL "
+                        f"({stop_loss:.2f})"
                     )
                     self._log(msg)
                     actions.append(msg)
                 elif session.lower_entries_today >= max_entries_per_line:
                     session.pending_green = None
                 else:
-                    entry_price = close if require_close_beyond_signal else pending_green["high"]
-                    stop_loss = pending_green["low"]
+                    entry_price = _power_entry_price(
+                        "long",
+                        pending_green,
+                        close,
+                        require_close_beyond_signal,
+                    )
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "long", entry_price, stop_loss
                     )
@@ -917,36 +1077,50 @@ class LiveLiquidityRunner:
                         and target_1 > 0
                         and entry_price < target_1
                     ):
-                        actions.extend(
-                            self._execute_entry(
-                                "long",
-                                entry_price,
-                                stop_loss,
-                                target_1,
-                                target_2,
-                                target_3,
-                                target_4,
-                                risk,
-                                "lower",
-                                timestamp,
-                            )
+                        flow_ok, flow_reason = self._order_flow_allows(
+                            "long", bars, signal, timestamp
                         )
-                        if self.state.position is not None:
-                            session.trades_in_sequence += 1
-                            session.lower_entries_today += 1
+                        if not flow_ok:
                             session.pending_green = None
                             session.rejection_green = None
-                            entered_this_bar = True
-                            session.lower_rearmed = False
-                            session.reentry_side = ""
-                            session.reentry_pullback_seen = False
+                            self._log(flow_reason)
+                            actions.append(flow_reason)
+                        else:
+                            actions.extend(
+                                self._execute_entry(
+                                    "long",
+                                    entry_price,
+                                    stop_loss,
+                                    target_1,
+                                    target_2,
+                                    target_3,
+                                    target_4,
+                                    risk,
+                                    "lower",
+                                    timestamp,
+                                )
+                            )
+                            if self.state.position is not None:
+                                session.trades_in_sequence += 1
+                                session.lower_entries_today += 1
+                                session.pending_green = None
+                                session.rejection_green = None
+                                entered_this_bar = True
+                                session.lower_rearmed = False
+                                session.reentry_side = ""
+                                session.reentry_pullback_seen = False
 
         if not entered_this_bar and short_rejection:
             body_ratio = _signal_body_ratio(open_price, high, low, close)
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
-                target = {"high": high, "low": low, "close": close, "index_ts": timestamp}
+                target = self._signal_with_opposing(
+                    {"high": high, "low": low, "close": close, "index_ts": timestamp},
+                    bars,
+                    "short",
+                    opposing_candle_lookback_bars,
+                )
                 if close < open_price:
                     session.pending_red = target
                 else:
@@ -956,7 +1130,12 @@ class LiveLiquidityRunner:
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
-                target = {"high": high, "low": low, "close": close, "index_ts": timestamp}
+                target = self._signal_with_opposing(
+                    {"high": high, "low": low, "close": close, "index_ts": timestamp},
+                    bars,
+                    "long",
+                    opposing_candle_lookback_bars,
+                )
                 if close > open_price:
                     session.pending_green = target
                 else:
@@ -977,13 +1156,17 @@ class LiveLiquidityRunner:
 
         try:
             daily_rows, intraday_rows = self._fetch_market_data()
+            try:
+                self._refresh_public_trades()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Order-flow trades fetch failed: {exc}")
             # Strategy decisions follow India-live mark; fills execute on trade account.
             mark_price = self.data.fetch_mark_price(self.symbol)
             # Delta daily candles are labelled by their UTC calendar day.
             day = datetime.now(timezone.utc).date().isoformat()
             self._reset_session_if_new_day(day)
 
-            upper, lower = self._today_levels(daily_rows, day)
+            upper, lower = self._today_levels(daily_rows, day, intraday_rows)
             self.state.upper_level = upper
             self.state.lower_level = lower
 
@@ -1044,8 +1227,18 @@ class LiveLiquidityRunner:
                         if idx is not None and idx > 0:
                             prev_row = closed_bars[idx - 1]
                         if not dry_run:
+                            bars_through_now = (
+                                closed_bars[: idx + 1] if idx is not None else closed_bars
+                            )
                             actions.extend(
-                                self._process_entry_bar(row, prev_row, daily_rows, upper, lower)
+                                self._process_entry_bar(
+                                    row,
+                                    prev_row,
+                                    daily_rows,
+                                    upper,
+                                    lower,
+                                    bars_through_now,
+                                )
                             )
                         processed += 1
                         self.state.session.last_processed_ts = row["timestamp"]

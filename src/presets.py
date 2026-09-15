@@ -5,7 +5,8 @@ candles, scored across six 30-day folds so the config has to work in more than o
 regime, then stress-tested against worse fees in scripts/stress.py.
 
 Headline numbers are the full 180-day window at 100 lots with Delta India costs
-(taker 0.05%, maker 0.02%, scalper offer on).
+(taker 0.05%, maker 0.02%, scalper offer on). Entries stay **market** so the
+backtest matches `scripts/run_live.py` / the Live Demo page.
 """
 
 from __future__ import annotations
@@ -19,15 +20,16 @@ STRATEGY = BacktestParams(
     fee_pct_per_side=0.05,
     fee_maker_pct=0.02,
     maker_on_take_profit=True,
+    # Live places a market order on the 1m break. Do not set maker_on_entry.
     maker_on_entry=False,
     scalper_offer=True,
     gst_pct=0.0,
     slippage_points=0.0,
-    # entry
-    min_sweep_points=1.0,
+    # entry — skip 1-point noise; require a real 1m body (same filters live uses)
+    min_sweep_points=3.0,
     require_close_back=False,
     require_reclaim=True,
-    min_confirm_body=1.0,
+    min_confirm_body=1.5,
     require_close_break=False,
     one_shot_confirm=False,
     swing_left=4,
@@ -51,21 +53,22 @@ STRATEGY = BacktestParams(
 class StrategyStats:
     """Measured on 180 days of India-live ETHUSD, 100 lots, 6/6 folds profitable."""
 
-    setups: int = 667
-    win_rate: float = 0.657
-    net_pnl: float = 1292.99
-    gross_pnl: float = 2238.60
-    total_fees: float = 945.61
-    max_drawdown: float = 83.63
-    profit_factor: float = 1.51
+    setups: int = 344
+    win_rate: float = 0.735
+    net_pnl: float = 812.10
+    gross_pnl: float = 1290.30
+    total_fees: float = 478.20
+    max_drawdown: float = 87.79
+    profit_factor: float = 1.58
     folds_profitable: int = 6
     folds: int = 6
-    worst_case_pnl: float = -75.15
+    worst_case_pnl: float = 91.53
 
 
 STATS = StrategyStats()
 
 SUMMARY = (
-    "Takes any 1-point sweep of a 15-minute swing, so it trades roughly 4x a day. "
-    "Every 30-day fold in the 180-day sample was profitable, between +$184 and +$287."
+    "Needs a 3-point 15m sweep and two 1m reversal candles with 1.5-point bodies, "
+    "then market-enters on Delta (same as live). About 2 trades a day. "
+    "All six 30-day folds were profitable."
 )

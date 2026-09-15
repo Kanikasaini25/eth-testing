@@ -17,8 +17,8 @@ M1_DAYS = 3
 
 
 def live_params(lots: int = 100) -> BacktestParams:
-    """Same tuned configuration the Streamlit backtest runs, so live matches the report."""
-    return replace(STRATEGY, position_lots=lots)
+    """Same rules as the Streamlit backtest. Entry is a market order on Delta."""
+    return replace(STRATEGY, position_lots=lots, maker_on_entry=False)
 
 
 def signal_on_last_bar(

@@ -6,10 +6,10 @@ Backtests a 15-minute liquidity sweep with 1-minute two-candle reversal confirma
 
 1. Mark 15-minute swing highs and lows (fractal pivots).
 2. Wait for a liquidity grab on a **closed 15-minute bar**:
-   - Downside: wick through a swing low and close back above it.
-   - Upside: wick through a swing high and close back below it.
-3. Confirm on the 1-minute chart: two consecutive reversal candles with a real body. Enter when the second breaks the first.
-4. Scale out at the first target and let the rest run, with the stop at breakeven.
+   - Downside: wick at least 3 points below a swing low.
+   - Upside: wick at least 3 points above a swing high.
+3. Confirm on the 1-minute chart: two consecutive reversal candles with a body of at least 1.5 points. Enter when the second breaks the first (**market order** on Delta).
+4. Close the full position at +10 points with a reduce-only maker limit. Stop sits 0.5 points beyond the grab extreme (max 35 points).
 
 Stop sits just beyond the grab extreme. The exact thresholds come from the preset you pick.
 
@@ -17,18 +17,19 @@ Stop sits just beyond the grab extreme. The exact thresholds come from the prese
 
 The original hand-picked settings lost money over 180 days (32% win rate, $122 net against a $259 drawdown), mostly because a 15-point stop cap rejected the majority of valid setups. `scripts/optimize.py` searches the parameter space instead, scoring every candidate across six 30-day folds so a config has to work in more than one market regime.
 
-The shipped configuration lives in `src/presets.py`. Measured on 180 days of India-live ETHUSD at 100 lots with Delta India costs (taker 0.05%, maker 0.02%, scalper offer on):
+The shipped configuration lives in `src/presets.py` and is what live uses. Measured on 180 days of India-live ETHUSD at 100 lots with Delta India costs (taker 0.05%, maker 0.02%, scalper offer on). **Entry is a market order**, same as Delta live:
 
-| Metric | Value |
-| --- | --- |
-| Trades | 667 (~4/day) |
-| Win rate | 65.7% |
-| Gross / fees / net | $2,239 − $946 = **$1,293** |
-| Max drawdown | $84 |
-| Profit factor | 1.51 |
-| Folds profitable | 6 of 6 (+$184 to +$287 each) |
+| Metric | Previous (1pt sweep) | **Now (3pt + 1.5 body)** |
+| --- | --- | --- |
+| Trades | 667 (~4/day) | **344 (~2/day)** |
+| Win rate | 65.7% | **73.5%** |
+| Gross / fees / net | $2,239 − $946 = $1,293 | **$1,290 − $478 = $812** |
+| Fee share of gross | 42% | **37%** |
+| Max drawdown | $84 | $88 |
+| Folds profitable | 6/6 | **6/6** |
+| Worst case (no scalper, taker exits, GST, 1pt slip) | −$75 | **+$92** |
 
-The edge is $1.94 per trade, so costs matter. Under worst-case assumptions (no scalper offer, taker exits, 18% GST) it still makes $592, but adding 1 point of slippage turns it into −$75. Join the Scalper Offer and use limit exits.
+Fewer, cleaner entries cut the fee bill in half. Total net is lower than the noisy 1-point version, but the edge per trade is larger ($2.36 vs $1.94) and it still profits if live fills slip a point.
 
 Reproduce or re-tune:
 
@@ -42,13 +43,12 @@ python scripts/sensitivity.py                  # one-parameter-at-a-time plateau
 
 ## Fees
 
-Fees are 42% of gross profit, and **entry fees are 74% of them**. A breakout entry is always taker: a buy limit at the break level crosses the ask, so the maker rebate is unreachable without switching to a pullback entry that may not fill. What you can control:
+Fees are still mostly **entry** (taker breakout). Live does not rest an entry limit — a buy at the 1m break crosses the ask — so do not enable “maker on entry” unless the live runner is changed to wait for a pullback.
 
-- **Join the Scalper Offer.** It waives the closing fee on exits inside 30 minutes and is worth $175 over the sample.
-- **Keep maker exits on.** A resting reduce-only limit pays 0.02% instead of 0.05%, worth another $275.
-- **Exit in one fill.** Scaling out doubles exit fills and roughly doubles exit fees, which is why the tuned strategy takes the whole position off at the target.
-
-Only 44% of exits currently land inside the scalper window (median hold is 37 minutes). Forcing an exit at 29 minutes does push that to 100% and cuts fees 22%, but it cuts gross profit more — net falls from $1,293 to $886. The optimizer reached the same conclusion independently and left `max_hold_minutes` at 0. The knob is in the sidebar if you want to see it yourself.
+- **Join the Scalper Offer.** Waives the closing fee on exits inside 30 minutes.
+- **Keep maker take-profit limits.** Live already rests a reduce-only limit at +10.
+- **Do not force-exit at 29 minutes.** Fees drop, net drops more.
+- **Do not scale out.** Two exits ≈ two exit fees.
 
 ## Setup
 
@@ -71,12 +71,11 @@ Set the symbol, pick a **start and end date** (IST), then click **Run backtest**
 
 ## Live (same rules)
 
-Uses the same engine and the same parameters as the backtest. On each closed 1-minute bar it looks for a 15-minute grab + two-candle confirmation, then:
+Uses the same engine and the same parameters as the backtest. On each closed 1-minute bar it looks for a 3-point 15m grab + two 1m candles with 1.5-point bodies, then:
 
-- Market-enters the full position
-- Rests the scale-out portion as a reduce-only maker limit at the first target
-- Rests a reduce-only stop on the full position
-- After the scale-out fills, moves the remainder to breakeven and targets the runner level
+- Market-enters the full position (taker — same as a breakout on Delta)
+- Rests a reduce-only maker limit on the full size at +10
+- Rests a reduce-only stop on the full size
 
 Put demo API keys in `.env`. Candles stay on India live; orders go to `DELTA_BASE_URL` (demo/testnet by default):
 

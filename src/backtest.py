@@ -42,11 +42,11 @@ class BacktestParams:
     sl_buffer_points: float = 0.5
     use_stop_loss: bool = True
     max_sl_points: float = 35.0
-    min_sweep_points: float = 1.0
+    min_sweep_points: float = 3.0
     require_reclaim: bool = True
     require_close_back: bool = False
     grab_on_m15_close: bool = True
-    min_confirm_body: float = 1.0
+    min_confirm_body: float = 1.5
     require_close_break: bool = False
     one_shot_confirm: bool = False
     breakeven_points: float = 0.0

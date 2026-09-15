@@ -94,8 +94,11 @@ def main() -> int:
     )
     print_endpoints()
     print(
-        f"Rules: 100 lots default, 80% off at +{params.target_points:.0f}, "
-        f"20% runner +{params.runner_target_points:.0f}, stop at grab extreme"
+        f"Rules: {params.position_lots} lots · "
+        f"{params.min_sweep_points:g}pt 15m grab · "
+        f"{params.min_confirm_body:g}pt 1m body · "
+        f"market entry · TP +{params.target_points:.0f} (maker limit, full size) · "
+        f"stop {params.sl_buffer_points:g} beyond grab (max {params.max_sl_points:g})"
     )
     if is_email_configured():
         print("Email alerts: on (NOTIFY_EMAIL)")

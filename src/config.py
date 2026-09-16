@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 LIVE_STATE_PATH = PROJECT_DIR / "data" / "live" / "liquidity_grab_state.json"
 
-# India production — all candle/backtest data must use this (never testnet).
+# India production — candle backtest default.
 INDIA_LIVE_URL = "https://api.india.delta.exchange"
+TESTNET_INDIA_URL = "https://cdn-ind.testnet.deltaex.org"
 
 
 def reload_env(*, override: bool = True) -> None:
@@ -21,7 +22,15 @@ reload_env(override=False)
 
 
 def get_candle_base_url() -> str:
-    """Historical OHLCV always comes from India live production."""
+    """Historical OHLCV for backtest/scanner.
+
+    Default: India live production (same as public history).
+    Set CANDLES_MATCH_ORDERS=true to use DELTA_BASE_URL (e.g. testnet demo fills).
+    """
+    if get_env_bool("CANDLES_MATCH_ORDERS", False):
+        order_url = get_env("DELTA_BASE_URL", INDIA_LIVE_URL).rstrip("/")
+        if order_url:
+            return order_url
     return INDIA_LIVE_URL
 
 

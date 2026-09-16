@@ -153,6 +153,7 @@ def backtest_params_from_env(symbol: str | None = None) -> "BacktestParams":
         exit_scale_pcts=_parse_exit_pcts(
             get_env("EXIT_SCALE_PCTS", "30,40,10,10")
         ),
+        runner_target_points=float(get_env("RUNNER_TARGET_POINTS", "200") or "200"),
         min_shadow_ratio=float(get_env("MIN_SHADOW_RATIO", "2.5") or "2.5"),
         min_pattern_points=float(get_env("MIN_PATTERN_POINTS", "2.0") or "2.0"),
         max_sl_points=float(get_env("MAX_SL_POINTS", "25") or "25"),
@@ -190,6 +191,7 @@ def backtest_params_from_env(symbol: str | None = None) -> "BacktestParams":
         session_london_end=int(get_env("SESSION_LONDON_END", "10") or "10"),
         session_overlap_start=int(get_env("SESSION_OVERLAP_START", "12") or "12"),
         session_overlap_end=int(get_env("SESSION_OVERLAP_END", "16") or "16"),
+        use_live_exits=_env_bool("USE_LIVE_EXITS", True),
         scalper_offer=True,
         maker_on_take_profit=True,
     )

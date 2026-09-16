@@ -27,11 +27,18 @@ RESOLUTION_SECONDS: dict[str, int] = {
 
 class DeltaExchangeClient:
     def __init__(self, base_url: str | None = None) -> None:
+        from src.config import get_env_bool
+
+        explicit = base_url is not None
         resolved = (base_url or get_candle_base_url()).rstrip("/")
-        if "testnet" in resolved.lower():
+        if (
+            not explicit
+            and "testnet" in resolved.lower()
+            and not get_env_bool("CANDLES_MATCH_ORDERS", False)
+        ):
             raise ValueError(
-                "Testnet candle data is not allowed. "
-                f"Use India live: {get_candle_base_url()}"
+                "Testnet candle data is blocked unless CANDLES_MATCH_ORDERS=true in .env. "
+                f"Default India live: {get_candle_base_url()}"
             )
         self.base_url = resolved
 
@@ -174,6 +181,39 @@ class DeltaExchangeClient:
             )
 
         return rows
+
+
+def sanitize_ohlcv(
+    rows: list[dict],
+    *,
+    min_price: float = 3000.0,
+    max_price: float = 5500.0,
+    max_wick_ratio: float = 1.08,
+    max_wick_points: float = 30.0,
+) -> list[dict]:
+    """Drop testnet candle spikes (bad ticks) so exit sim matches live fills."""
+    cleaned: list[dict] = []
+    for row in rows:
+        o = float(row["open"])
+        h = float(row["high"])
+        l = float(row["low"])
+        c = float(row["close"])
+        body_hi = max(o, c)
+        body_lo = min(o, c)
+        if h > max_price or h > body_hi * max_wick_ratio + max_wick_points:
+            h = body_hi
+        if l < min_price or l < body_lo / max_wick_ratio - max_wick_points:
+            l = body_lo
+        cleaned.append(
+            {
+                **row,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+            }
+        )
+    return cleaned
 
 
 def closed_ohlcv(

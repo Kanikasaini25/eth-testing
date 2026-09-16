@@ -103,6 +103,8 @@ class BacktestParams:
     session_overlap_start: int = 12
     session_overlap_end: int = 16
     min_overlay_votes: int = 2
+    # Match scripts/run_live.py: partial @ T1, then runner @ RUNNER_TARGET_POINTS with BE stop
+    use_live_exits: bool = True
 
 @dataclass
 class OpenPosition:
@@ -407,12 +409,152 @@ def _slice_position(position: OpenPosition, lots: int) -> OpenPosition:
     )
 
 
+def _partial_lots(total: int, pct: float) -> int:
+    """Same sizing as live runner (scripts/run_live.py)."""
+    if pct <= 0 or pct >= 100 or total < 2:
+        return 0
+    closed = int(total * pct / 100.0)
+    return min(max(closed, 1), total - 1)
+
+
+def _runner_target_price(position: OpenPosition, params: BacktestParams) -> float:
+    if position.side == "long":
+        return position.entry_price + params.runner_target_points
+    return position.entry_price - params.runner_target_points
+
+
+def _t1_target_price(entry: float, side: str, params: BacktestParams) -> float:
+    if side == "long":
+        return entry + params.target_points
+    return entry - params.target_points
+
+
+def _manage_open_live_runner(
+    position: OpenPosition,
+    bar: dict,
+    wallet: float,
+    params: BacktestParams,
+    fills: list[dict],
+) -> tuple[OpenPosition | None, list[dict], float]:
+    high = float(bar["high"])
+    low = float(bar["low"])
+    if position.side == "long":
+        if low <= position.stop_loss:
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                position.stop_loss,
+                "stop_loss_after_T1",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+        if high >= position.target:
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                position.target,
+                "runner_take_profit",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+    else:
+        if high >= position.stop_loss:
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                position.stop_loss,
+                "stop_loss_after_T1",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+        if low <= position.target:
+            trade, wallet = _close_trade(
+                position,
+                bar["timestamp"],
+                position.target,
+                "runner_take_profit",
+                wallet,
+                params,
+            )
+            fills.append(trade)
+            return None, fills, wallet
+    return position, fills, wallet
+
+
+def _manage_open_live(
+    position: OpenPosition,
+    bar: dict,
+    wallet: float,
+    params: BacktestParams,
+) -> tuple[OpenPosition | None, list[dict], float]:
+    """Exit model aligned with LiveGrabRunner: T1 partial then runner to RUNNER_TARGET_POINTS."""
+    fills: list[dict] = []
+    if position.partial_taken:
+        return _manage_open_live_runner(position, bar, wallet, params, fills)
+
+    partial = _partial_lots(position.original_lots, params.partial_exit_pct)
+    t1 = position.target
+    high = float(bar["high"])
+    low = float(bar["low"])
+
+    if position.side == "long":
+        if low <= position.stop_loss:
+            trade, wallet = _close_trade(
+                position, bar["timestamp"], position.stop_loss, "stop_loss", wallet, params
+            )
+            return None, [trade], wallet
+        if partial > 0 and high >= t1:
+            slice_pos = _slice_position(position, partial)
+            trade, wallet = _close_trade(
+                slice_pos, bar["timestamp"], t1, "take_profit_T1", wallet, params
+            )
+            fills.append(trade)
+            position.lots -= partial
+            position.partial_taken = True
+            position.targets_hit = 1
+            position.stop_loss = position.entry_price
+            position.target = _runner_target_price(position, params)
+            if position.lots <= 0:
+                return None, fills, wallet
+            return _manage_open_live_runner(position, bar, wallet, params, fills)
+    else:
+        if high >= position.stop_loss:
+            trade, wallet = _close_trade(
+                position, bar["timestamp"], position.stop_loss, "stop_loss", wallet, params
+            )
+            return None, [trade], wallet
+        if partial > 0 and low <= t1:
+            slice_pos = _slice_position(position, partial)
+            trade, wallet = _close_trade(
+                slice_pos, bar["timestamp"], t1, "take_profit_T1", wallet, params
+            )
+            fills.append(trade)
+            position.lots -= partial
+            position.partial_taken = True
+            position.targets_hit = 1
+            position.stop_loss = position.entry_price
+            position.target = _runner_target_price(position, params)
+            if position.lots <= 0:
+                return None, fills, wallet
+            return _manage_open_live_runner(position, bar, wallet, params, fills)
+
+    return position, fills, wallet
+
+
 def _manage_open(
     position: OpenPosition,
     bar: dict,
     wallet: float,
     params: BacktestParams,
 ) -> tuple[OpenPosition | None, list[dict], float]:
+    if params.use_live_exits:
+        return _manage_open_live(position, bar, wallet, params)
     maybe_move_to_breakeven(position, bar, params.breakeven_points)
     fills: list[dict] = []
     pcts = _exit_pcts(params)
@@ -552,14 +694,19 @@ def _summarize(
     )
 
 
-def _open_position(signal: EntrySignal, lots: int) -> OpenPosition:
-    target_step = abs(signal.target - signal.entry_price)
+def _open_position(signal: EntrySignal, lots: int, params: BacktestParams) -> OpenPosition:
+    if params.use_live_exits:
+        target = _t1_target_price(signal.entry_price, signal.side, params)
+        target_step = params.target_points
+    else:
+        target = signal.target
+        target_step = abs(signal.target - signal.entry_price)
     return OpenPosition(
         side=signal.side,
         entry_ts=signal.entry_ts,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
-        target=signal.target,
+        target=target,
         lots=lots,
         swing_price=signal.swing_price,
         sweep_extreme=signal.sweep_extreme,
@@ -692,7 +839,7 @@ def run_liquidity_backtest(
             continue
         if entry_log is not None:
             entry_log.append(signal)
-        position = _open_position(signal, lots)
+        position = _open_position(signal, lots, params)
         pending = None
         position, fills, wallet = _manage_open(position, bar, wallet, params)
         trades.extend(fills)
@@ -752,6 +899,27 @@ def _scan_new_patterns(
     return found, count
 
 
+def filter_trades_by_entry_window(
+    trades: list[dict],
+    *,
+    start_epoch: int,
+    end_epoch: int,
+) -> list[dict]:
+    """Keep fills whose entry time falls inside the selected backtest window."""
+    kept: list[dict] = []
+    for trade in trades:
+        ets = epoch_of(trade["entry_ts"])
+        if start_epoch <= ets <= end_epoch:
+            kept.append(trade)
+    return kept
+
+
+def _exit_bar_map(m1_exit_rows: list[dict] | None) -> dict[float, dict] | None:
+    if not m1_exit_rows:
+        return None
+    return {epoch_of(row["timestamp"]): row for row in m1_exit_rows}
+
+
 def run_pattern_backtest(
     signal_rows: list[dict],
     m1_rows: list[dict],
@@ -759,6 +927,7 @@ def run_pattern_backtest(
     *,
     bar_seconds: int = 900,
     entry_log: list[EntrySignal] | None = None,
+    m1_exit_rows: list[dict] | None = None,
 ) -> BacktestResult:
     params = params or BacktestParams()
     cfg = pattern_config_from_params(params)
@@ -773,15 +942,17 @@ def run_pattern_backtest(
     lots = params.position_lots
     signal_epochs = [epoch_of(row["timestamp"]) for row in signal_rows]
     closed_ptr = -1
+    exit_bars = _exit_bar_map(m1_exit_rows)
 
     for bar in m1_rows:
         now = epoch_of(bar["timestamp"])
+        exit_bar = exit_bars.get(now, bar) if exit_bars else bar
         prev_closed = closed_ptr
         closed_open = last_closed_bar_open(now, bar_seconds)
         while closed_ptr + 1 < len(signal_epochs) and signal_epochs[closed_ptr + 1] <= closed_open:
             closed_ptr += 1
 
-        runners, runner_fills, wallet = _update_runners(runners, bar, wallet, params)
+        runners, runner_fills, wallet = _update_runners(runners, exit_bar, wallet, params)
         trades.extend(runner_fills)
 
         if closed_ptr > prev_closed and position is None and pending is None and not runners:
@@ -794,7 +965,7 @@ def run_pattern_backtest(
                 pending = found
 
         if position is not None:
-            position, fills, wallet = _manage_open(position, bar, wallet, params)
+            position, fills, wallet = _manage_open(position, exit_bar, wallet, params)
             trades.extend(fills)
             if position is not None and position.partial_taken:
                 runners.append(position)
@@ -819,15 +990,16 @@ def run_pattern_backtest(
             continue
         if entry_log is not None:
             entry_log.append(signal)
-        position = _open_position(signal, lots)
+        position = _open_position(signal, lots, params)
         pending = None
-        position, fills, wallet = _manage_open(position, bar, wallet, params)
+        position, fills, wallet = _manage_open(position, exit_bar, wallet, params)
         trades.extend(fills)
         if position is not None and position.partial_taken:
             runners.append(position)
             position = None
 
-    last = m1_rows[-1] if m1_rows else None
+    exit_series = m1_exit_rows if m1_exit_rows else m1_rows
+    last = exit_series[-1] if exit_series else None
     open_left = ([position] if position is not None else []) + runners
     if last is not None:
         for leftover in open_left:

@@ -501,12 +501,6 @@ def _close_trade(
     return wallet_usd, entry_fee_remaining - entry_fee_share, open_lots - lots
 
 
-def _points_target(entry: float, side: str, points: float) -> float:
-    if side == "long":
-        return entry + points
-    return entry - points
-
-
 def _signal_body_ratio(open_price: float, high: float, low: float, close: float) -> float:
     candle_range = high - low
     if candle_range <= 0:
@@ -638,10 +632,11 @@ def _passes_liquidity_entry_filters(
     use_session_filter: bool = False,
     session_start_hour_delta: int = 8,
     session_end_hour_delta: int = 20,
+    max_sl_points: float = 0,
 ) -> bool:
     if not _liquidity_entry_valid(
         side, entry_price, stop_loss, 0,
-        min_sl_points=0, max_sl_points=0,
+        min_sl_points=0, max_sl_points=max_sl_points,
         min_reward_to_risk=0, max_sl_pct=float("inf"),
     ):
         return False
@@ -666,9 +661,19 @@ def _impulse_opposite_candle(
     lookback: int = 60,
 ) -> dict | None:
     """Opposite impulse candle: dump red (lowest low) before LONG, rally green (highest high) before SHORT."""
+    ranked = _ranked_impulse_opposite_candles(rows, index, side, lookback)
+    return ranked[0] if ranked else None
+
+
+def _ranked_impulse_opposite_candles(
+    rows: list[dict],
+    index: int,
+    side: str,
+    lookback: int = 60,
+) -> list[dict]:
     start = max(0, index - max(lookback, 1))
     signal_day = delta_candle_day(rows[index]["timestamp"])
-    best: dict | None = None
+    found: list[dict] = []
     for cursor in range(index - 1, start - 1, -1):
         if delta_candle_day(rows[cursor]["timestamp"]) != signal_day:
             break
@@ -677,12 +682,14 @@ def _impulse_opposite_candle(
         high = float(rows[cursor]["high"])
         low = float(rows[cursor]["low"])
         if side == "long" and close < open_price:
-            if best is None or low < best["low"]:
-                best = {"high": high, "low": low, "close": close, "index": cursor}
+            found.append({"high": high, "low": low, "close": close, "index": cursor})
         elif side == "short" and close > open_price:
-            if best is None or high > best["high"]:
-                best = {"high": high, "low": low, "close": close, "index": cursor}
-    return best
+            found.append({"high": high, "low": low, "close": close, "index": cursor})
+    if side == "long":
+        found.sort(key=lambda candle: (candle["low"], candle["index"]))
+    else:
+        found.sort(key=lambda candle: (-candle["high"], candle["index"]))
+    return found
 
 
 def _with_opposing_level(
@@ -742,6 +749,47 @@ def _latest_rejection_wick_stop(side: str, signal: dict) -> float:
     if opposing_high > 0:
         stop = max(stop, opposing_high)
     return stop
+
+
+def _signal_bar_index(rows: list[dict], signal: dict) -> int:
+    if signal.get("index") is not None:
+        return int(signal["index"])
+    ts = str(signal.get("index_ts") or "")
+    for cursor, row in enumerate(rows):
+        if row["timestamp"] == ts:
+            return cursor
+    return max(len(rows) - 1, 0)
+
+
+def _resolve_rejection_stop(
+    *,
+    side: str,
+    signal: dict,
+    entry_price: float,
+    rows: list[dict],
+    lookback: int,
+    max_sl_points: float,
+) -> float | None:
+    """Keep the 1st wick SL if tight; else try the 2nd dump-red / rally-green. Skip if still wide."""
+    stop = _latest_rejection_wick_stop(side, signal)
+    if max_sl_points <= 0 or abs(entry_price - stop) <= max_sl_points:
+        return stop
+    ranked = _ranked_impulse_opposite_candles(
+        rows, _signal_bar_index(rows, signal), side, lookback
+    )
+    if len(ranked) < 2:
+        return None
+    tightened_signal = dict(signal)
+    tightened_signal["opposing_high"] = ranked[1]["high"]
+    tightened_signal["opposing_low"] = ranked[1]["low"]
+    tightened = _latest_rejection_wick_stop(side, tightened_signal)
+    if abs(entry_price - tightened) > max_sl_points:
+        return None
+    if side == "short" and tightened <= entry_price:
+        return None
+    if side == "long" and tightened >= entry_price:
+        return None
+    return tightened
 
 
 def _entry_buyer_seller_counts(
@@ -815,7 +863,8 @@ def backtest_liquidity_intraday(
     partial_target_points = 0.0
     use_swing_target_for_partial = False
     runner_swing_lookback = 0
-    min_sl_points = max_sl_points = min_reward_to_risk = 0.0
+    min_sl_points = min_reward_to_risk = 0.0
+    max_sl_points = float(rule.parameters.get("max_sl_points", 15))
     max_sl_pct = float("inf")
     use_trailing_after_partial = False
     trailing_stop_points = 0.0
@@ -1256,9 +1305,24 @@ def backtest_liquidity_intraday(
             elif not short_triggered:
                 pending_red = None
             if short_triggered:
-                stop_loss = _latest_rejection_wick_stop("short", pending_red)
-                # Confirmation also took out the rejection-wick SL → cancel setup.
-                if (
+                entry_price = _power_entry_price(
+                    "short",
+                    pending_red,
+                    close,
+                    require_close_beyond_signal,
+                )
+                stop_loss = _resolve_rejection_stop(
+                    side="short",
+                    signal=pending_red,
+                    entry_price=entry_price,
+                    rows=intraday_rows,
+                    lookback=opposing_candle_lookback_bars,
+                    max_sl_points=max_sl_points,
+                )
+                if stop_loss is None:
+                    pending_red = None
+                    rejection_red = None
+                elif (
                     skip_if_confirmation_hits_signal_stop
                     and high >= stop_loss
                 ):
@@ -1269,12 +1333,6 @@ def backtest_liquidity_intraday(
                     equity_curve.append(wallet_usd / starting_wallet)
                     continue
                 else:
-                    entry_price = _power_entry_price(
-                        "short",
-                        pending_red,
-                        close,
-                        require_close_beyond_signal,
-                    )
                     initial_stop_loss = stop_loss
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "short", entry_price, stop_loss
@@ -1298,6 +1356,7 @@ def backtest_liquidity_intraday(
                             use_session_filter=use_session_filter,
                             session_start_hour_delta=session_start_hour,
                             session_end_hour_delta=session_end_hour,
+                            max_sl_points=max_sl_points,
                         )
                         and target_1 > 0
                         and entry_price > target_1
@@ -1347,9 +1406,24 @@ def backtest_liquidity_intraday(
             elif not long_triggered:
                 pending_green = None
             if long_triggered:
-                stop_loss = _latest_rejection_wick_stop("long", pending_green)
-                # Confirmation also took out the rejection-wick SL → cancel setup.
-                if (
+                entry_price = _power_entry_price(
+                    "long",
+                    pending_green,
+                    close,
+                    require_close_beyond_signal,
+                )
+                stop_loss = _resolve_rejection_stop(
+                    side="long",
+                    signal=pending_green,
+                    entry_price=entry_price,
+                    rows=intraday_rows,
+                    lookback=opposing_candle_lookback_bars,
+                    max_sl_points=max_sl_points,
+                )
+                if stop_loss is None:
+                    pending_green = None
+                    rejection_green = None
+                elif (
                     skip_if_confirmation_hits_signal_stop
                     and low <= stop_loss
                 ):
@@ -1360,12 +1434,6 @@ def backtest_liquidity_intraday(
                     equity_curve.append(wallet_usd / starting_wallet)
                     continue
                 else:
-                    entry_price = _power_entry_price(
-                        "long",
-                        pending_green,
-                        close,
-                        require_close_beyond_signal,
-                    )
                     initial_stop_loss = stop_loss
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "long", entry_price, stop_loss
@@ -1389,6 +1457,7 @@ def backtest_liquidity_intraday(
                             use_session_filter=use_session_filter,
                             session_start_hour_delta=session_start_hour,
                             session_end_hour_delta=session_end_hour,
+                            max_sl_points=max_sl_points,
                         )
                         and target_1 > 0
                         and entry_price < target_1
@@ -1498,6 +1567,7 @@ def backtest_liquidity_intraday(
         "uses_1m_candle_confirmation": True,
         "supports_long_and_short": True,
         "uses_latest_rejection_wick_stop_loss": True,
+        "tightens_wide_stop_with_second_wick": max_sl_points > 0,
         "entry_on_next_candle": entry_on_next_candle,
         "requires_close_beyond_signal": require_close_beyond_signal,
         "requires_two_consecutive_confirmation_candles": True,

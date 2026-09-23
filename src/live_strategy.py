@@ -15,7 +15,7 @@ from src.backtest import (
     _liquidity_targets,
     _passes_liquidity_entry_filters,
     _power_entry_price,
-    _latest_rejection_wick_stop,
+    _resolve_rejection_stop,
     _signal_body_ratio,
     _with_opposing_level,
     reentry_after_profitable_close,
@@ -28,7 +28,6 @@ from src.delta_trading import DeltaTradingClient
 INDIA_LIVE_DATA_URL = "https://api.india.delta.exchange"
 from src.email_notify import (
     send_entry_signal_email,
-    send_partial_exit_email,
     send_runner_exit_email,
     send_stop_loss_email,
 )
@@ -198,6 +197,8 @@ class LiveLiquidityRunner:
             position_raw.pop("best_price", None)
             position_raw.pop("partial_lots", None)
             position_raw.pop("runner_lots", None)
+            position_raw.pop("open_lots", None)
+            position_raw.pop("points_partial_taken", None)
             position = LivePositionState(**position_raw)
         else:
             position = None
@@ -570,52 +571,6 @@ class LiveLiquidityRunner:
 
         return [action]
 
-    def _execute_partial_exit(self, position: LivePositionState, exit_price: float) -> list[str]:
-        exit_side = self._exit_side(position.side)
-        self.trading.cancel_open_orders(symbol=self.symbol)
-        self.trading.place_market_order(
-            size=position.partial_lots,
-            side=exit_side,
-            symbol=self.symbol,
-            reduce_only=True,
-        )
-
-        params = self._params()
-        trailing_points = float(params.get("trailing_stop_points", 3.0))
-        use_trailing = bool(params.get("use_trailing_stop_after_partial", True))
-        if use_trailing:
-            if position.side == "long":
-                position.best_price = max(position.target_1, exit_price)
-                position.stop_loss = max(position.entry_price, position.best_price - trailing_points)
-            else:
-                position.best_price = min(position.target_1, exit_price)
-                position.stop_loss = min(position.entry_price, position.best_price + trailing_points)
-        else:
-            position.stop_loss = position.entry_price
-
-        self._replace_runner_stop(position, position.stop_loss, exit_price)
-        position.partial_taken = True
-        position.runner_open = True
-
-        action = (
-            f"PARTIAL EXIT {position.partial_lots} lots @ ~{exit_price:.2f}, "
-            f"runner SL {position.stop_loss:.2f}"
-        )
-        self._log(action)
-        self._send_email(
-            send_partial_exit_email(
-                symbol=self.symbol,
-                side=position.side,
-                entry_price=position.entry_price,
-                exit_price=exit_price,
-                partial_lots=position.partial_lots,
-                runner_lots=position.runner_lots,
-                runner_stop_loss=position.stop_loss,
-                target_1=position.target_1,
-            )
-        )
-        return [action]
-
     def _execute_runner_exit(
         self,
         position: LivePositionState,
@@ -814,6 +769,7 @@ class LiveLiquidityRunner:
         opposing_candle_lookback_bars = int(
             params.get("opposing_candle_lookback_bars", 60)
         )
+        max_sl_points = float(params.get("max_sl_points", 15))
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
         use_session_filter = bool(params.get("use_session_filter", False))
         session_start_hour = int(
@@ -923,9 +879,30 @@ class LiveLiquidityRunner:
             elif not short_triggered:
                 session.pending_red = None
             if short_triggered:
-                stop_loss = _latest_rejection_wick_stop("short", pending_red)
-                # Confirmation also took out the rejection-wick SL → cancel setup.
-                if (
+                entry_price = _power_entry_price(
+                    "short",
+                    pending_red,
+                    close,
+                    require_close_beyond_signal,
+                )
+                stop_loss = _resolve_rejection_stop(
+                    side="short",
+                    signal=pending_red,
+                    entry_price=entry_price,
+                    rows=bars,
+                    lookback=opposing_candle_lookback_bars,
+                    max_sl_points=max_sl_points,
+                )
+                if stop_loss is None:
+                    session.pending_red = None
+                    session.rejection_red = None
+                    msg = (
+                        f"SKIP SHORT: stop wider than {max_sl_points:g} pts "
+                        "after 2nd rally wick"
+                    )
+                    self._log(msg)
+                    actions.append(msg)
+                elif (
                     skip_if_confirmation_hits_signal_stop
                     and high >= stop_loss
                 ):
@@ -940,12 +917,6 @@ class LiveLiquidityRunner:
                 elif session.upper_entries_today >= max_entries_per_line:
                     session.pending_red = None
                 else:
-                    entry_price = _power_entry_price(
-                        "short",
-                        pending_red,
-                        close,
-                        require_close_beyond_signal,
-                    )
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "short", entry_price, stop_loss
                     )
@@ -968,6 +939,7 @@ class LiveLiquidityRunner:
                             use_session_filter=use_session_filter,
                             session_start_hour_delta=session_start_hour,
                             session_end_hour_delta=session_end_hour,
+                            max_sl_points=max_sl_points,
                         )
                         and target_1 > 0
                         and entry_price > target_1
@@ -1028,9 +1000,30 @@ class LiveLiquidityRunner:
             elif not long_triggered:
                 session.pending_green = None
             if long_triggered:
-                stop_loss = _latest_rejection_wick_stop("long", pending_green)
-                # Confirmation also took out the rejection-wick SL → cancel setup.
-                if (
+                entry_price = _power_entry_price(
+                    "long",
+                    pending_green,
+                    close,
+                    require_close_beyond_signal,
+                )
+                stop_loss = _resolve_rejection_stop(
+                    side="long",
+                    signal=pending_green,
+                    entry_price=entry_price,
+                    rows=bars,
+                    lookback=opposing_candle_lookback_bars,
+                    max_sl_points=max_sl_points,
+                )
+                if stop_loss is None:
+                    session.pending_green = None
+                    session.rejection_green = None
+                    msg = (
+                        f"SKIP LONG: stop wider than {max_sl_points:g} pts "
+                        "after 2nd dump wick"
+                    )
+                    self._log(msg)
+                    actions.append(msg)
+                elif (
                     skip_if_confirmation_hits_signal_stop
                     and low <= stop_loss
                 ):
@@ -1045,12 +1038,6 @@ class LiveLiquidityRunner:
                 elif session.lower_entries_today >= max_entries_per_line:
                     session.pending_green = None
                 else:
-                    entry_price = _power_entry_price(
-                        "long",
-                        pending_green,
-                        close,
-                        require_close_beyond_signal,
-                    )
                     risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
                         "long", entry_price, stop_loss
                     )
@@ -1073,6 +1060,7 @@ class LiveLiquidityRunner:
                             use_session_filter=use_session_filter,
                             session_start_hour_delta=session_start_hour,
                             session_end_hour_delta=session_end_hour,
+                            max_sl_points=max_sl_points,
                         )
                         and target_1 > 0
                         and entry_price < target_1

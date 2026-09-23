@@ -85,6 +85,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "After TP1 or TP2, the full position remains open while the stop locks the achieved R level.",
                 "Never take more than 3 trades in one sequence.",
                 "If the confirmation candle breaks the signal entry level and also takes out the signal stop wick, skip the trade (no entry, no wait for a third candle).",
+                "If the initial SL is more than 15 points from entry, use the 2nd dump-red (long) or 2nd rally-green (short) wick; if it is still wider than 15 points, skip the trade.",
                 "Backtest on ETH futures (e.g. ETHUSD on Delta Exchange).",
             ],
             parameters={
@@ -122,6 +123,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "profit_milestones_pct": [2, 3, 4, 5],
                 "starting_wallet_usd": 10000,
                 "stop_loss_mode": "latest_rejection_wick",
+                "max_sl_points": 15,
                 "swing_lookback_days": 20,
                 "runner_swing_lookback_days": 60,
                 "fee_pct_per_side": 0.05,

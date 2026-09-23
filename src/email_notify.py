@@ -117,40 +117,6 @@ def send_entry_signal_email(
     return send_email(subject, body)
 
 
-def send_partial_exit_email(
-    *,
-    symbol: str,
-    side: str,
-    entry_price: float,
-    exit_price: float,
-    partial_lots: int,
-    runner_lots: int,
-    runner_stop_loss: float,
-    target_1: float,
-) -> EmailResult:
-    trade_label = "LONG" if side == "long" else "SHORT"
-    points = (exit_price - entry_price) if side == "long" else (entry_price - exit_price)
-    subject = f"LQDTY Partial Exit: {partial_lots} lots {symbol} @ {exit_price:.2f} (+{points:.2f} pts)"
-
-    body = "\n".join(
-        [
-            "LQDTY Liquidity Strategy — Partial Exit",
-            "",
-            f"Symbol:         {symbol}",
-            f"Side:           {trade_label}",
-            f"Entry price:    {entry_price:.2f}",
-            f"Partial exit:   {partial_lots} lots @ {exit_price:.2f}",
-            f"Points gained:  {points:.2f}",
-            f"Target 1:       {target_1:.2f}",
-            f"Runner left:    {runner_lots} lots",
-            f"Runner SL:      {runner_stop_loss:.2f}",
-            "",
-            "80 lots booked. 20-lot runner continues with trailing stop.",
-        ]
-    )
-    return send_email(subject, body)
-
-
 def send_stop_loss_email(
     *,
     symbol: str,

@@ -5,6 +5,7 @@ import unittest
 from src.backtest import (
     _impulse_opposite_candle,
     _liquidity_levels_from_intraday,
+    _resolve_rejection_stop,
     reentry_after_profitable_close,
     same_day_reentry_allowed,
 )
@@ -102,6 +103,78 @@ class DayIsolationTests(unittest.TestCase):
         self.assertIsNotNone(opposite)
         assert opposite is not None
         self.assertEqual(opposite["low"], 2498.0)
+
+    def test_should_keep_first_wick_when_stop_is_within_15_points(self) -> None:
+        rows = [
+            _bar("2026-09-04T12:00:00+00:00", 2512.0, 2500.0, 2501.0, 2511.0),
+            _bar("2026-09-04T12:01:00+00:00", 2508.0, 2499.0, 2500.0, 2507.0),
+            _bar("2026-09-04T12:02:00+00:00", 2505.0, 2498.0, 2504.0, 2499.0),
+        ]
+        signal = {
+            "high": 2505.0,
+            "low": 2498.0,
+            "close": 2499.0,
+            "index": 2,
+            "opposing_high": 2512.0,
+            "opposing_low": 2500.0,
+        }
+        stop = _resolve_rejection_stop(
+            side="short",
+            signal=signal,
+            entry_price=2498.0,
+            rows=rows,
+            lookback=60,
+            max_sl_points=15,
+        )
+        self.assertEqual(stop, 2512.0)
+
+    def test_should_use_second_rally_wick_when_first_stop_is_too_wide(self) -> None:
+        rows = [
+            _bar("2026-09-04T12:40:00+00:00", 2580.0, 2500.0, 2501.0, 2570.0),
+            _bar("2026-09-04T12:41:00+00:00", 2512.0, 2501.0, 2502.0, 2510.0),
+            _bar("2026-09-04T12:42:00+00:00", 2505.0, 2498.0, 2504.0, 2499.0),
+        ]
+        signal = {
+            "high": 2505.0,
+            "low": 2498.0,
+            "close": 2499.0,
+            "index": 2,
+            "opposing_high": 2580.0,
+            "opposing_low": 2500.0,
+        }
+        stop = _resolve_rejection_stop(
+            side="short",
+            signal=signal,
+            entry_price=2498.0,
+            rows=rows,
+            lookback=60,
+            max_sl_points=15,
+        )
+        self.assertEqual(stop, 2512.0)
+
+    def test_should_skip_when_second_wick_is_still_too_wide(self) -> None:
+        rows = [
+            _bar("2026-09-04T12:40:00+00:00", 2580.0, 2500.0, 2501.0, 2570.0),
+            _bar("2026-09-04T12:41:00+00:00", 2570.0, 2501.0, 2502.0, 2565.0),
+            _bar("2026-09-04T12:42:00+00:00", 2505.0, 2498.0, 2504.0, 2499.0),
+        ]
+        signal = {
+            "high": 2505.0,
+            "low": 2498.0,
+            "close": 2499.0,
+            "index": 2,
+            "opposing_high": 2580.0,
+            "opposing_low": 2500.0,
+        }
+        stop = _resolve_rejection_stop(
+            side="short",
+            signal=signal,
+            entry_price=2498.0,
+            rows=rows,
+            lookback=60,
+            max_sl_points=15,
+        )
+        self.assertIsNone(stop)
 
 
 if __name__ == "__main__":

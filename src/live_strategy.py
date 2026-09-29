@@ -15,11 +15,15 @@ from src.backtest import (
     _liquidity_targets,
     _passes_liquidity_entry_filters,
     _power_entry_price,
+    _profit_r_multiples,
     _resolve_rejection_stop,
     _signal_body_ratio,
+    _structure_signal,
     _with_opposing_level,
     reentry_after_profitable_close,
+    sweep_signal_allowed,
 )
+from src.market_structure import StructureCheck, structure_params_from_dict
 from src.config import LIVE_STATE_DIR, STRATEGIES_DIR, ensure_data_dirs, get_env
 from src.delta_data import DeltaExchangeClient
 from src.delta_trading import DeltaTradingClient
@@ -709,16 +713,24 @@ class LiveLiquidityRunner:
             self.trading.close_position_at_market(symbol=self.symbol)
             self._arm_reentry_if_same_day(position)
             self.state.position = None
-            action = f"TAKE PROFIT (+5%) — closed {position.entry_lots} lots @ ~{mark_price:.2f}"
+            tp_r = int(_profit_r_multiples(position.risk)[3])
+            action = (
+                f"TAKE PROFIT ({tp_r}R) — closed {position.entry_lots} lots "
+                f"@ ~{mark_price:.2f}"
+            )
             self._log(action)
             actions.append(action)
         else:
+            m1, m2, m3, _ = _profit_r_multiples(position.risk)
             while position.target_stage < 2 and favorable >= signed_targets[position.target_stage + 1]:
                 position.target_stage += 1
                 stop_price = position.target_1 if position.target_stage == 1 else position.target_2
                 self._replace_runner_stop(position, stop_price, mark_price)
-                locked_pct = 2 if position.target_stage == 1 else 3
-                action = f"+{locked_pct + 1}% reached — SL moved to +{locked_pct}% ({stop_price:.2f})"
+                hit_r = int(m2 if position.target_stage == 1 else m3)
+                locked_r = int(m1 if position.target_stage == 1 else m2)
+                action = (
+                    f"{hit_r}R reached — SL moved to {locked_r}R ({stop_price:.2f})"
+                )
                 self._log(action)
                 actions.append(action)
             stop_hit = (
@@ -769,7 +781,8 @@ class LiveLiquidityRunner:
         opposing_candle_lookback_bars = int(
             params.get("opposing_candle_lookback_bars", 60)
         )
-        max_sl_points = float(params.get("max_sl_points", 15))
+        structure_params = structure_params_from_dict(params)
+        max_sl_points = float(params.get("max_sl_points", 7))
         use_daily_trend_filter = bool(params.get("use_daily_trend_filter", False))
         use_session_filter = bool(params.get("use_session_filter", False))
         session_start_hour = int(
@@ -811,27 +824,52 @@ class LiveLiquidityRunner:
             if high > lower:
                 session.lower_rearmed = True
         entered_this_bar = False
-        short_rejection = (
+        bar_index = len(bars) - 1
+        short_rejection = False
+        short_structure = StructureCheck()
+        if (
             session.reentry_side != "long"
-            and
-            session.touched_upper
+            and session.touched_upper
             and session.upper_rearmed
-            and high > upper
             and close < open_price
-        )
+        ):
+            short_rejection, short_structure = sweep_signal_allowed(
+                side="short",
+                rows=bars,
+                index=bar_index,
+                level=upper,
+                beyond_line=high > upper,
+                structure_params=structure_params,
+            )
+            if high > upper and short_structure.blocks_entry:
+                msg = f"SKIP SHORT: {short_structure.reason}"
+                self._log(msg)
+                actions.append(msg)
         short_rejection = short_rejection or (
             session.reentry_side == "short"
             and session.reentry_pullback_seen
             and close < open_price
         )
-        long_rejection = (
+        long_rejection = False
+        long_structure = StructureCheck()
+        if (
             session.reentry_side != "short"
-            and
-            session.touched_lower
+            and session.touched_lower
             and session.lower_rearmed
-            and low < lower
             and close > open_price
-        )
+        ):
+            long_rejection, long_structure = sweep_signal_allowed(
+                side="long",
+                rows=bars,
+                index=bar_index,
+                level=lower,
+                beyond_line=low < lower,
+                structure_params=structure_params,
+            )
+            if low < lower and long_structure.blocks_entry:
+                msg = f"SKIP LONG: {long_structure.reason}"
+                self._log(msg)
+                actions.append(msg)
         long_rejection = long_rejection or (
             session.reentry_side == "long"
             and session.reentry_pullback_seen
@@ -884,13 +922,16 @@ class LiveLiquidityRunner:
                     pending_red,
                     close,
                     require_close_beyond_signal,
+                    require_break_opposing_candle,
                 )
                 stop_loss = _resolve_rejection_stop(
                     side="short",
                     signal=pending_red,
                     entry_price=entry_price,
                     rows=bars,
-                    lookback=opposing_candle_lookback_bars,
+                    lookback=int(
+                        pending_red.get("opposing_lookback", opposing_candle_lookback_bars)
+                    ),
                     max_sl_points=max_sl_points,
                 )
                 if stop_loss is None:
@@ -1005,13 +1046,16 @@ class LiveLiquidityRunner:
                     pending_green,
                     close,
                     require_close_beyond_signal,
+                    require_break_opposing_candle,
                 )
                 stop_loss = _resolve_rejection_stop(
                     side="long",
                     signal=pending_green,
                     entry_price=entry_price,
                     rows=bars,
-                    lookback=opposing_candle_lookback_bars,
+                    lookback=int(
+                        pending_green.get("opposing_lookback", opposing_candle_lookback_bars)
+                    ),
                     max_sl_points=max_sl_points,
                 )
                 if stop_loss is None:
@@ -1103,11 +1147,13 @@ class LiveLiquidityRunner:
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
-                target = self._signal_with_opposing(
+                target = _structure_signal(
                     {"high": high, "low": low, "close": close, "index_ts": timestamp},
                     bars,
+                    bar_index,
                     "short",
                     opposing_candle_lookback_bars,
+                    short_structure,
                 )
                 if close < open_price:
                     session.pending_red = target
@@ -1118,11 +1164,13 @@ class LiveLiquidityRunner:
             body_ok = min_signal_body_ratio <= 0 or body_ratio >= min_signal_body_ratio
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
-                target = self._signal_with_opposing(
+                target = _structure_signal(
                     {"high": high, "low": low, "close": close, "index_ts": timestamp},
                     bars,
+                    bar_index,
                     "long",
                     opposing_candle_lookback_bars,
+                    long_structure,
                 )
                 if close > open_price:
                     session.pending_green = target

@@ -168,6 +168,7 @@ class OrderFlowTests(unittest.TestCase):
         self.assertFalse(_breaks_opposing_candle("long", 2494.30, 2491.45, 2494.30, signal))
         self.assertTrue(_breaks_opposing_candle("long", 2497.20, 2493.00, 2497.00, signal))
         self.assertEqual(_power_entry_price("long", signal, 2497.00, False), 2496.55)
+        self.assertEqual(_power_entry_price("long", signal, 2494.30, False, False), 2492.95)
 
     def test_stop_uses_sweep_rejection_wick(self) -> None:
         long_signal = {

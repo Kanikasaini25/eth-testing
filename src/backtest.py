@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 
+from src.market_structure import (
+    StructureCheck,
+    StructureParams,
+    evaluate_structure,
+    retests_fresh_extreme,
+    structure_params_from_dict,
+)
 from src.order_flow import (
     evaluate_liquidity_order_flow,
     order_flow_params_from_dict,
@@ -590,28 +597,47 @@ def _liquidity_sweep_at_lower(low: float, close: float, lower: float) -> bool:
     return low < lower and close > lower
 
 
+def _profit_r_multiples(risk: float) -> tuple[float, float, float, float]:
+    """R multiples for trail ladder (same for all SL sizes; max SL is capped at 7 pts).
+
+    4R → 6R (SL→4R) → 8R (SL→6R) → 10R close
+    """
+    return (4.0, 6.0, 8.0, 10.0)
+
+
 def _liquidity_targets(
     side: str,
     entry_price: float,
     initial_stop_loss: float,
 ) -> tuple[float, float, float, float, float]:
-    """Return initial risk and the +2%, +3%, +4%, and +5% targets."""
+    """Return initial risk R and four price targets from the SL-size ladder."""
     risk = abs(entry_price - initial_stop_loss)
+    m1, m2, m3, m4 = _profit_r_multiples(risk)
     if side == "long":
         return (
             risk,
-            entry_price * 1.02,
-            entry_price * 1.03,
-            entry_price * 1.04,
-            entry_price * 1.05,
+            entry_price + m1 * risk,
+            entry_price + m2 * risk,
+            entry_price + m3 * risk,
+            entry_price + m4 * risk,
         )
     return (
         risk,
-        entry_price * 0.98,
-        entry_price * 0.97,
-        entry_price * 0.96,
-        entry_price * 0.95,
+        entry_price - m1 * risk,
+        entry_price - m2 * risk,
+        entry_price - m3 * risk,
+        entry_price - m4 * risk,
     )
+
+
+def _take_profit_exit_reason(risk: float) -> str:
+    return f"take_profit_{int(_profit_r_multiples(risk)[3])}R"
+
+
+def _trail_stop_exit_reason(target_stage: int, risk: float) -> str:
+    m1, m2, _, _ = _profit_r_multiples(risk)
+    locked = m1 if target_stage == 1 else m2
+    return f"stop_at_{int(locked)}R"
 
 
 def _passes_liquidity_entry_filters(
@@ -708,6 +734,42 @@ def _with_opposing_level(
     return payload
 
 
+def _structure_signal(
+    signal: dict,
+    rows: list[dict],
+    index: int,
+    side: str,
+    default_lookback: int,
+    structure: StructureCheck,
+) -> dict:
+    """After a CHoCH + retest, take the opposing candle (and SL wick) from the retest leg only."""
+    if structure.ready and 0 <= structure.break_index < index:
+        lookback = index - structure.break_index
+        payload = _with_opposing_level(signal, rows, index, side, lookback)
+        if payload.get("opposing_high"):
+            payload["opposing_lookback"] = lookback
+            return payload
+    return _with_opposing_level(signal, rows, index, side, default_lookback)
+
+
+def sweep_signal_allowed(
+    *,
+    side: str,
+    rows: list[dict],
+    index: int,
+    level: float,
+    beyond_line: bool,
+    structure_params: StructureParams,
+) -> tuple[bool, StructureCheck]:
+    """Plain sweep beyond the line, unless the line broke in a trend (then CHoCH + retest first)."""
+    if beyond_line and structure_params.require_fresh_extreme:
+        beyond_line = retests_fresh_extreme(side, rows, index, level, structure_params)
+    structure = evaluate_structure(side, rows, index, level, structure_params)
+    if structure.ready:
+        return True, structure
+    return beyond_line and not structure.blocks_entry, structure
+
+
 def _breaks_opposing_candle(
     side: str,
     high: float,
@@ -728,9 +790,12 @@ def _power_entry_price(
     signal: dict,
     close: float,
     require_close_beyond_signal: bool,
+    require_break_opposing_candle: bool = True,
 ) -> float:
     if require_close_beyond_signal:
         return close
+    if not require_break_opposing_candle:
+        return float(signal["high"] if side == "long" else signal["low"])
     if side == "long":
         return max(float(signal["high"]), float(signal.get("opposing_high") or signal["high"]))
     return min(float(signal["low"]), float(signal.get("opposing_low") or signal["low"]))
@@ -864,7 +929,7 @@ def backtest_liquidity_intraday(
     use_swing_target_for_partial = False
     runner_swing_lookback = 0
     min_sl_points = min_reward_to_risk = 0.0
-    max_sl_points = float(rule.parameters.get("max_sl_points", 15))
+    max_sl_points = float(rule.parameters.get("max_sl_points", 7))
     max_sl_pct = float("inf")
     use_trailing_after_partial = False
     trailing_stop_points = 0.0
@@ -885,6 +950,7 @@ def backtest_liquidity_intraday(
     opposing_candle_lookback_bars = int(
         rule.parameters.get("opposing_candle_lookback_bars", 60)
     )
+    structure_params = structure_params_from_dict(rule.parameters)
     use_daily_trend_filter = bool(rule.parameters.get("use_daily_trend_filter", False))
     use_session_filter = bool(rule.parameters.get("use_session_filter", True))
     session_start_hour = int(
@@ -1031,7 +1097,8 @@ def backtest_liquidity_intraday(
             ):
                 wallet_usd, entry_fee_remaining, open_lots = close_open_trade(
                     trades, wallet_usd, entry_ts, timestamp, entry_price, target_4,
-                    "take_profit_5pct", side, position_lots, position_lots,
+                    _take_profit_exit_reason(abs(entry_price - initial_stop_loss)),
+                    side, position_lots, position_lots,
                     entry_fee_remaining, open_lots,
                     fee_pct_per_side=fee_pct_per_side,
                     initial_stop_loss=initial_stop_loss,
@@ -1053,7 +1120,9 @@ def backtest_liquidity_intraday(
                     trades, wallet_usd, entry_ts, timestamp, entry_price, stop_loss,
                     "stop_loss"
                     if target_stage == 0
-                    else f"stop_at_{2 if target_stage == 1 else 3}pct",
+                    else _trail_stop_exit_reason(
+                        target_stage, abs(entry_price - initial_stop_loss)
+                    ),
                     side, position_lots, position_lots, entry_fee_remaining,
                     open_lots,
                     fee_pct_per_side=fee_pct_per_side,
@@ -1257,19 +1326,31 @@ def backtest_liquidity_intraday(
             equity_curve.append(wallet_usd / starting_wallet)
             continue
 
-        short_rejection = (
-            reentry_side != "long"
-            and
-            touched_upper and upper_rearmed and high > upper and close < open_price
-        )
+        short_rejection = False
+        short_structure = StructureCheck()
+        if reentry_side != "long" and touched_upper and upper_rearmed and close < open_price:
+            short_rejection, short_structure = sweep_signal_allowed(
+                side="short",
+                rows=intraday_rows,
+                index=index,
+                level=upper,
+                beyond_line=high > upper,
+                structure_params=structure_params,
+            )
         short_rejection = short_rejection or (
             reentry_side == "short" and reentry_pullback_seen and close < open_price
         )
-        long_rejection = (
-            reentry_side != "short"
-            and
-            touched_lower and lower_rearmed and low < lower and close > open_price
-        )
+        long_rejection = False
+        long_structure = StructureCheck()
+        if reentry_side != "short" and touched_lower and lower_rearmed and close > open_price:
+            long_rejection, long_structure = sweep_signal_allowed(
+                side="long",
+                rows=intraday_rows,
+                index=index,
+                level=lower,
+                beyond_line=low < lower,
+                structure_params=structure_params,
+            )
         long_rejection = long_rejection or (
             reentry_side == "long" and reentry_pullback_seen and close > open_price
         )
@@ -1310,13 +1391,16 @@ def backtest_liquidity_intraday(
                     pending_red,
                     close,
                     require_close_beyond_signal,
+                    require_break_opposing_candle,
                 )
                 stop_loss = _resolve_rejection_stop(
                     side="short",
                     signal=pending_red,
                     entry_price=entry_price,
                     rows=intraday_rows,
-                    lookback=opposing_candle_lookback_bars,
+                    lookback=int(
+                        pending_red.get("opposing_lookback", opposing_candle_lookback_bars)
+                    ),
                     max_sl_points=max_sl_points,
                 )
                 if stop_loss is None:
@@ -1411,13 +1495,16 @@ def backtest_liquidity_intraday(
                     pending_green,
                     close,
                     require_close_beyond_signal,
+                    require_break_opposing_candle,
                 )
                 stop_loss = _resolve_rejection_stop(
                     side="long",
                     signal=pending_green,
                     entry_price=entry_price,
                     rows=intraday_rows,
-                    lookback=opposing_candle_lookback_bars,
+                    lookback=int(
+                        pending_green.get("opposing_lookback", opposing_candle_lookback_bars)
+                    ),
                     max_sl_points=max_sl_points,
                 )
                 if stop_loss is None:
@@ -1502,12 +1589,13 @@ def backtest_liquidity_intraday(
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
                 if close < open_price:
-                    pending_red = _with_opposing_level(
+                    pending_red = _structure_signal(
                         {"high": high, "low": low, "close": close, "index": index},
                         intraday_rows,
                         index,
                         "short",
                         opposing_candle_lookback_bars,
+                        short_structure,
                     )
                 else:
                     rejection_red = _with_opposing_level(
@@ -1523,12 +1611,13 @@ def backtest_liquidity_intraday(
             range_ok = min_signal_range_points <= 0 or high - low >= min_signal_range_points
             if body_ok and range_ok:
                 if close > open_price:
-                    pending_green = _with_opposing_level(
+                    pending_green = _structure_signal(
                         {"high": high, "low": low, "close": close, "index": index},
                         intraday_rows,
                         index,
                         "long",
                         opposing_candle_lookback_bars,
+                        long_structure,
                     )
                 else:
                     rejection_green = _with_opposing_level(
@@ -1591,6 +1680,8 @@ def backtest_liquidity_intraday(
         "simulates_trading_fees": fee_pct_per_side > 0,
         "uses_order_flow_filter": bool(rule.parameters.get("use_order_flow_filter", True)),
         "requires_break_opposing_candle": require_break_opposing_candle,
+        "waits_for_choch_retest_in_trend": structure_params.enabled,
+        "requires_fresh_extreme_retest": structure_params.require_fresh_extreme,
     }
 
     result = _build_result(rule, trades, equity_curve, daily_rows, entry_based_win_rate=True)

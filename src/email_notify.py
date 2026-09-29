@@ -6,6 +6,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from src.config import get_env
+from src.backtest import _profit_r_multiples
 
 
 @dataclass
@@ -91,6 +92,21 @@ def send_entry_signal_email(
     trade_label = "BUY (LONG)" if side == "long" else "SELL (SHORT)"
     subject = f"LQDTY Entry Signal: {trade_label} {symbol} @ {entry_price:.2f}"
 
+    m1, m2, m3, m4 = _profit_r_multiples(risk)
+    if risk < 3:
+        target_lines = [
+            f"Target {int(m1)}R:  {target_1:.2f} (keep initial SL)",
+            f"Target {int(m2)}R:  {target_2:.2f} (move SL to {int(m1)}R)",
+            f"Target {int(m3)}R:  {target_3:.2f} (move SL to {int(m2)}R)",
+            f"Target {int(m4)}R: {target_4:.2f} (close all)",
+        ]
+    else:
+        target_lines = [
+            f"Target {int(m1)}R:  {target_1:.2f} (keep initial SL)",
+            f"Target {int(m2)}R:  {target_2:.2f} (move SL to {int(m1)}R)",
+            f"Target {int(m4)}R:  {target_4:.2f} (close all)",
+        ]
+
     body = "\n".join(
         [
             "LQDTY Liquidity Strategy — Entry Signal",
@@ -101,10 +117,7 @@ def send_entry_signal_email(
             f"Entry price: {entry_price:.2f}",
             f"Stop loss:   {stop_loss:.2f}",
             f"Risk (initial): {risk:.2f}",
-            f"Target +2%:  {target_1:.2f} (keep initial SL)",
-            f"Target +3%:  {target_2:.2f} (move SL to +2%)",
-            f"Target +4%:  {target_3:.2f} (move SL to +3%)",
-            f"Target +5%:  {target_4:.2f} (close all)",
+            *target_lines,
             f"Size:        {entry_lots} lots",
             f"Liquidity:   {entry_line} line",
             "",

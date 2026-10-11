@@ -8,6 +8,13 @@ from src.order_flow import (
     order_flow_params_from_dict,
     snapshot_from_bars,
 )
+from src.profit_confirmation import (
+    CONFIRMED,
+    FAILED,
+    confirm_profit_points,
+    confirmation_status,
+    confirmation_trigger,
+)
 from src.rule_extractor import TradingRule
 from src.timezone import delta_candle_day, format_delta_timestamp
 
@@ -69,6 +76,7 @@ class BacktestResult:
     trades: list[Trade]
     backtest_mode: str = "daily"
     rule_compliance: dict[str, bool] | None = None
+    skipped_unconfirmed: int = 0
 
 
 def _closes(rows: list[dict]) -> list[float]:
@@ -904,6 +912,8 @@ def backtest_liquidity_intraday(
         rule.parameters.get("platform_fee_pct_per_side", 0.0)
     )
     starting_wallet = float(rule.parameters.get("starting_wallet_usd", 10_000))
+    confirm_points = confirm_profit_points(rule.parameters)
+    move_sl_to_entry_at_2pct = bool(rule.parameters.get("move_sl_to_entry_at_2pct", False))
 
     trades: list[Trade] = []
     wallet_usd = starting_wallet
@@ -925,6 +935,10 @@ def backtest_liquidity_intraday(
     runner_open = False
     entry_fee_remaining = 0.0
     open_lots = 0
+    awaiting_confirmation = False
+    breakeven_moved = False
+    confirm_trigger = 0.0
+    skipped_unconfirmed = 0
 
     current_day = ""
     touched_upper = False
@@ -1022,6 +1036,38 @@ def backtest_liquidity_intraday(
             if high > lower:
                 lower_rearmed = True
 
+        if in_position and awaiting_confirmation:
+            status = confirmation_status(
+                side=side,
+                trigger=confirm_trigger,
+                stop_loss=initial_stop_loss,
+                high=high,
+                low=low,
+            )
+            if status == FAILED:
+                awaiting_confirmation = False
+                in_position = False
+                skipped_unconfirmed += 1
+                full_sl_count += 1
+                if entry_line == "upper":
+                    upper_rearmed = True
+                    upper_line_blocked = True
+                elif entry_line == "lower":
+                    lower_rearmed = True
+                    lower_line_blocked = True
+            elif status == CONFIRMED:
+                awaiting_confirmation = False
+                entry_price = confirm_trigger
+                entry_ts = timestamp
+                risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
+                    side, entry_price, initial_stop_loss
+                )
+                entry_fee_remaining = _trading_fee_usd(
+                    entry_price, position_lots, fee_pct_per_side
+                )
+            equity_curve.append(wallet_usd / starting_wallet)
+            continue
+
         if in_position:
             favorable = high if side == "long" else low
             if (
@@ -1041,6 +1087,14 @@ def backtest_liquidity_intraday(
                 in_position = False
                 equity_curve.append(wallet_usd / starting_wallet)
                 continue
+            if (
+                move_sl_to_entry_at_2pct
+                and target_stage == 0
+                and not breakeven_moved
+                and (favorable >= target_1 if side == "long" else favorable <= target_1)
+            ):
+                breakeven_moved = True
+                stop_loss = entry_price
             while target_stage < 2 and (
                 favorable >= (target_2 if target_stage == 0 else target_3)
                 if side == "long"
@@ -1049,11 +1103,16 @@ def backtest_liquidity_intraday(
                 target_stage += 1
                 stop_loss = target_1 if target_stage == 1 else target_2
             if (low <= stop_loss if side == "long" else high >= stop_loss):
+                is_full_stop = target_stage == 0 and not breakeven_moved
+                if is_full_stop:
+                    exit_reason = "stop_loss"
+                elif target_stage == 0:
+                    exit_reason = "breakeven_stop"
+                else:
+                    exit_reason = f"stop_at_{2 if target_stage == 1 else 3}pct"
                 wallet_usd, entry_fee_remaining, open_lots = close_open_trade(
                     trades, wallet_usd, entry_ts, timestamp, entry_price, stop_loss,
-                    "stop_loss"
-                    if target_stage == 0
-                    else f"stop_at_{2 if target_stage == 1 else 3}pct",
+                    exit_reason,
                     side, position_lots, position_lots, entry_fee_remaining,
                     open_lots,
                     fee_pct_per_side=fee_pct_per_side,
@@ -1063,7 +1122,12 @@ def backtest_liquidity_intraday(
                 if target_stage > 0:
                     reentry_side = reentry_after_profitable_close(entry_ts, timestamp, side)
                     reentry_pullback_seen = False
-                if target_stage == 0:
+                elif not is_full_stop:
+                    if entry_line == "upper":
+                        upper_rearmed = True
+                    elif entry_line == "lower":
+                        lower_rearmed = True
+                if is_full_stop:
                     full_sl_count += 1
                     if entry_line == "upper":
                         upper_rearmed = True
@@ -1383,6 +1447,11 @@ def backtest_liquidity_intraday(
                         entry_fee_remaining = _trading_fee_usd(
                             entry_price, position_lots, fee_pct_per_side
                         )
+                        awaiting_confirmation = confirm_points > 0
+                        breakeven_moved = False
+                        confirm_trigger = confirmation_trigger(
+                            "short", entry_price, confirm_points
+                        )
                         trades_in_sequence += 1
                         upper_entries_today += 1
                         pending_red = None
@@ -1484,6 +1553,11 @@ def backtest_liquidity_intraday(
                         entry_fee_remaining = _trading_fee_usd(
                             entry_price, position_lots, fee_pct_per_side
                         )
+                        awaiting_confirmation = confirm_points > 0
+                        breakeven_moved = False
+                        confirm_trigger = confirmation_trigger(
+                            "long", entry_price, confirm_points
+                        )
                         trades_in_sequence += 1
                         lower_entries_today += 1
                         pending_green = None
@@ -1541,7 +1615,7 @@ def backtest_liquidity_intraday(
 
         equity_curve.append(wallet_usd / starting_wallet)
 
-    if in_position:
+    if in_position and not awaiting_confirmation:
         last = intraday_rows[-1]
         exit_price = float(last["close"])
         exit_lots = runner_lots if partial_taken else position_lots
@@ -1591,11 +1665,14 @@ def backtest_liquidity_intraday(
         "simulates_trading_fees": fee_pct_per_side > 0,
         "uses_order_flow_filter": bool(rule.parameters.get("use_order_flow_filter", True)),
         "requires_break_opposing_candle": require_break_opposing_candle,
+        "requires_profit_confirmation_before_entry": confirm_points > 0,
+        "moves_sl_to_entry_at_2pct": move_sl_to_entry_at_2pct,
     }
 
     result = _build_result(rule, trades, equity_curve, daily_rows, entry_based_win_rate=True)
     result.backtest_mode = "eth_100lots_r_multiple"
     result.rule_compliance = compliance
+    result.skipped_unconfirmed = skipped_unconfirmed
     return result
 
 

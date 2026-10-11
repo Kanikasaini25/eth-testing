@@ -71,7 +71,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
             ],
             exit_rules=[
                 "Risk R is the absolute distance from entry to the initial stop.",
-                "At +2% profit, keep the initial SL unchanged.",
+                "At +2% profit, move SL to the entry price (breakeven).",
                 "At +3% profit, move SL to +2% profit.",
                 "At +4% profit, move SL to +3% profit.",
                 "At +5% profit, close the entire position.",
@@ -86,6 +86,7 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "Never take more than 3 trades in one sequence.",
                 "If the confirmation candle breaks the signal entry level and also takes out the signal stop wick, skip the trade (no entry, no wait for a third candle).",
                 "If the initial SL is more than 15 points from entry, use the 2nd dump-red (long) or 2nd rally-green (short) wick; if it is still wider than 15 points, skip the trade.",
+                "Profit confirmation: track every valid signal on paper first; enter only after price moves 8 points in the trade direction without hitting the signal SL (keep the original SL). If the SL is hit first, skip the trade.",
                 "Backtest on ETH futures (e.g. ETHUSD on Delta Exchange).",
             ],
             parameters={
@@ -124,6 +125,8 @@ def _extract_liquidity_strategy_rules(text: str) -> list[TradingRule]:
                 "starting_wallet_usd": 10000,
                 "stop_loss_mode": "latest_rejection_wick",
                 "max_sl_points": 15,
+                "confirm_profit_points": 8,
+                "move_sl_to_entry_at_2pct": True,
                 "swing_lookback_days": 20,
                 "runner_swing_lookback_days": 60,
                 "fee_pct_per_side": 0.05,

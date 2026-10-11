@@ -134,7 +134,14 @@ class DeltaExchangeClient:
         candles = all_candles
 
         if not candles:
-            raise RuntimeError(f"No candle data returned for {symbol}")
+            range_start = datetime.fromtimestamp(start, tz=timezone.utc).date()
+            range_end = datetime.fromtimestamp(end - 1, tz=timezone.utc).date()
+            raise RuntimeError(
+                f"No {resolution} candle data returned for {symbol} between "
+                f"{range_start} and {range_end} (UTC) from {self.base_url}. "
+                "The contract may not have been listed on this exchange yet for "
+                "that range — try a later start date or a different exchange."
+            )
 
         rows: list[dict] = []
         seen: set[int] = set()

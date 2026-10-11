@@ -37,6 +37,13 @@ from src.order_flow import (
     order_flow_params_from_dict,
     snapshot_for_bar_tail,
 )
+from src.profit_confirmation import (
+    CONFIRMED,
+    FAILED,
+    confirm_profit_points,
+    confirmation_status,
+    confirmation_trigger,
+)
 from src.rule_extractor import TradingRule, rules_from_json
 from src.timezone import delta_candle_day, format_delta_timestamp
 
@@ -72,6 +79,23 @@ class LivePositionState:
     target_4: float = 0.0
     target_stage: int = 0
     entry_lots: int = FIXED_ENTRY_LOTS
+    breakeven_moved: bool = False
+
+    @property
+    def is_full_stop(self) -> bool:
+        return self.target_stage == 0 and not self.breakeven_moved
+
+
+@dataclass
+class LivePendingConfirmation:
+    """A valid signal tracked on paper until it reaches the profit trigger."""
+
+    side: str
+    signal_price: float
+    stop_loss: float
+    trigger: float
+    entry_line: str
+    signal_ts: str
 
 
 @dataclass
@@ -102,6 +126,7 @@ class LiveStrategyState:
     symbol: str = "ETHUSD"
     session: LiveSessionState = field(default_factory=LiveSessionState)
     position: LivePositionState | None = None
+    pending_confirmation: LivePendingConfirmation | None = None
     upper_level: float | None = None
     lower_level: float | None = None
     logs: list[str] = field(default_factory=list)
@@ -202,7 +227,14 @@ class LiveLiquidityRunner:
             position = LivePositionState(**position_raw)
         else:
             position = None
-        return LiveStrategyState(session=session, position=position, **raw)
+        pending_raw = raw.pop("pending_confirmation", None)
+        pending = LivePendingConfirmation(**pending_raw) if pending_raw else None
+        return LiveStrategyState(
+            session=session,
+            position=position,
+            pending_confirmation=pending,
+            **raw,
+        )
 
     def _save_state(self) -> None:
         payload = asdict(self.state)
@@ -571,6 +603,108 @@ class LiveLiquidityRunner:
 
         return [action]
 
+    def _has_open_or_pending_trade(self) -> bool:
+        return self.state.position is not None or self.state.pending_confirmation is not None
+
+    def _enter_or_await_confirmation(
+        self,
+        side: str,
+        entry_price: float,
+        stop_loss: float,
+        entry_line: str,
+        entry_ts: str,
+    ) -> list[str]:
+        """Enter now, or paper-track the signal when profit confirmation is enabled."""
+        points = confirm_profit_points(self._params())
+        if points <= 0:
+            risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
+                side, entry_price, stop_loss
+            )
+            return self._execute_entry(
+                side, entry_price, stop_loss, target_1, target_2, target_3,
+                target_4, risk, entry_line, entry_ts,
+            )
+        trigger = confirmation_trigger(side, entry_price, points)
+        self.state.pending_confirmation = LivePendingConfirmation(
+            side=side,
+            signal_price=entry_price,
+            stop_loss=stop_loss,
+            trigger=trigger,
+            entry_line=entry_line,
+            signal_ts=entry_ts,
+        )
+        action = (
+            f"PAPER {side.upper()} signal @ {entry_price:.2f}, SL {stop_loss:.2f} — "
+            f"entering only if price reaches {trigger:.2f} (+{points:g} pts) first"
+        )
+        self._log(action)
+        return [action]
+
+    def _resolve_pending_confirmation(
+        self,
+        new_bars: list[dict],
+        mark_price: float,
+    ) -> list[str]:
+        """Enter once the paper trade reaches its trigger; skip if its stop is hit first."""
+        pending = self.state.pending_confirmation
+        if pending is None:
+            return []
+        prices = [(float(bar["high"]), float(bar["low"])) for bar in new_bars]
+        prices.append((mark_price, mark_price))
+        for high, low in prices:
+            status = confirmation_status(
+                side=pending.side,
+                trigger=pending.trigger,
+                stop_loss=pending.stop_loss,
+                high=high,
+                low=low,
+            )
+            if status == FAILED:
+                return self._skip_unconfirmed(pending)
+            if status == CONFIRMED:
+                return self._enter_confirmed(pending, mark_price)
+        return []
+
+    def _skip_unconfirmed(self, pending: LivePendingConfirmation) -> list[str]:
+        session = self.state.session
+        session.full_sl_count += 1
+        if pending.entry_line == "upper":
+            session.upper_rearmed = True
+        elif pending.entry_line == "lower":
+            session.lower_rearmed = True
+        self.state.pending_confirmation = None
+        action = (
+            f"SKIP {pending.side.upper()}: paper trade hit SL {pending.stop_loss:.2f} "
+            f"before reaching {pending.trigger:.2f} — no order placed"
+        )
+        self._log(action)
+        return [action]
+
+    def _enter_confirmed(
+        self,
+        pending: LivePendingConfirmation,
+        mark_price: float,
+    ) -> list[str]:
+        stop_already_hit = (
+            mark_price <= pending.stop_loss
+            if pending.side == "long"
+            else mark_price >= pending.stop_loss
+        )
+        if stop_already_hit:
+            return self._skip_unconfirmed(pending)
+        self.state.pending_confirmation = None
+        self._log(
+            f"CONFIRMED {pending.side.upper()}: price reached {pending.trigger:.2f} — entering"
+        )
+        risk, target_1, target_2, target_3, target_4 = _liquidity_targets(
+            pending.side, mark_price, pending.stop_loss
+        )
+        return self._execute_entry(
+            pending.side, mark_price, pending.stop_loss, target_1, target_2,
+            target_3, target_4, risk, pending.entry_line,
+            datetime.now(timezone.utc).isoformat(),
+        )
+
     def _execute_runner_exit(
         self,
         position: LivePositionState,
@@ -618,10 +752,11 @@ class LiveLiquidityRunner:
         self.trading.cancel_open_orders(symbol=self.symbol)
         self.trading.close_position_at_market(symbol=self.symbol)
         session = self.state.session
-        if position.target_stage == 0:
+        if position.is_full_stop:
             session.full_sl_count += 1
         self.state.position = None
-        action = f"STOP LOSS {position.entry_lots} lots @ ~{exit_price:.2f}"
+        label = "STOP LOSS" if position.is_full_stop else "BREAKEVEN STOP"
+        action = f"{label} {position.entry_lots} lots @ ~{exit_price:.2f}"
         self._log(action)
         self._send_email(
             send_stop_loss_email(
@@ -653,7 +788,8 @@ class LiveLiquidityRunner:
         if was_partial:
             self._arm_reentry_if_same_day(position)
         else:
-            session.full_sl_count += 1
+            if position.is_full_stop:
+                session.full_sl_count += 1
             if entry_line == "upper":
                 session.upper_rearmed = True
             elif entry_line == "lower":
@@ -713,6 +849,19 @@ class LiveLiquidityRunner:
             self._log(action)
             actions.append(action)
         else:
+            if (
+                self._params().get("move_sl_to_entry_at_2pct", False)
+                and position.target_stage == 0
+                and not position.breakeven_moved
+                and favorable >= signed_targets[0]
+            ):
+                self._replace_runner_stop(position, position.entry_price, mark_price)
+                if self.state.position is None:
+                    return [f"+2% reached but price already back at entry — closed @ ~{mark_price:.2f}"]
+                position.breakeven_moved = True
+                action = f"+2% reached — SL moved to entry ({position.entry_price:.2f})"
+                self._log(action)
+                actions.append(action)
             while position.target_stage < 2 and favorable >= signed_targets[position.target_stage + 1]:
                 position.target_stage += 1
                 stop_price = position.target_1 if position.target_stage == 1 else position.target_2
@@ -747,7 +896,7 @@ class LiveLiquidityRunner:
         lower: float,
         bars: list[dict],
     ) -> list[str]:
-        if self.state.position is not None:
+        if self._has_open_or_pending_trade():
             return []
 
         params = self._params()
@@ -954,20 +1103,11 @@ class LiveLiquidityRunner:
                             actions.append(flow_reason)
                         else:
                             actions.extend(
-                                self._execute_entry(
-                                    "short",
-                                    entry_price,
-                                    stop_loss,
-                                    target_1,
-                                    target_2,
-                                    target_3,
-                                    target_4,
-                                    risk,
-                                    "upper",
-                                    timestamp,
+                                self._enter_or_await_confirmation(
+                                    "short", entry_price, stop_loss, "upper", timestamp
                                 )
                             )
-                            if self.state.position is not None:
+                            if self._has_open_or_pending_trade():
                                 session.trades_in_sequence += 1
                                 session.upper_entries_today += 1
                                 session.pending_red = None
@@ -1075,20 +1215,11 @@ class LiveLiquidityRunner:
                             actions.append(flow_reason)
                         else:
                             actions.extend(
-                                self._execute_entry(
-                                    "long",
-                                    entry_price,
-                                    stop_loss,
-                                    target_1,
-                                    target_2,
-                                    target_3,
-                                    target_4,
-                                    risk,
-                                    "lower",
-                                    timestamp,
+                                self._enter_or_await_confirmation(
+                                    "long", entry_price, stop_loss, "lower", timestamp
                                 )
                             )
-                            if self.state.position is not None:
+                            if self._has_open_or_pending_trade():
                                 session.trades_in_sequence += 1
                                 session.lower_entries_today += 1
                                 session.pending_green = None
@@ -1183,12 +1314,19 @@ class LiveLiquidityRunner:
             closed_bars = self._closed_bars_today(intraday_rows, day)
             new_bars = self._new_closed_bars(closed_bars)
 
-            if self.state.position is not None:
-                # Still in trade: advance bar cursor without entries (backtest skips
-                # entry logic while in_position).
+            was_pending = self.state.pending_confirmation is not None
+            if was_pending:
+                if dry_run:
+                    actions.append(f"[DRY RUN] Check paper trade @ {mark_price:.2f}")
+                else:
+                    actions.extend(self._resolve_pending_confirmation(new_bars, mark_price))
+
+            if self._has_open_or_pending_trade():
+                # Still in trade (or paper-tracking one): advance bar cursor without
+                # entries (backtest skips entry logic while in_position).
                 if new_bars:
                     self.state.session.last_processed_ts = new_bars[-1]["timestamp"]
-            elif was_in_position:
+            elif was_in_position or was_pending:
                 # Just flattened this tick (exchange/mark SL or TP). Consume bars
                 # through now without entries — backtest does not enter on the
                 # exit bar; the next tick scans fresh bars with line rearmed.
@@ -1230,7 +1368,7 @@ class LiveLiquidityRunner:
                             )
                         processed += 1
                         self.state.session.last_processed_ts = row["timestamp"]
-                        if self.state.position is not None:
+                        if self._has_open_or_pending_trade():
                             break
 
                     if dry_run and processed:

@@ -539,6 +539,12 @@ def render_live_strategy(symbol: str, base_url: str) -> None:
     st.markdown("**Tracked position**")
     if state.position:
         st.json(asdict(state.position))
+    elif state.pending_confirmation:
+        pending = state.pending_confirmation
+        st.write(
+            f"Paper-tracking {pending.side.upper()} signal @ {pending.signal_price:.2f} — "
+            f"enters only if price reaches {pending.trigger:.2f} before SL {pending.stop_loss:.2f}."
+        )
     else:
         st.write("Flat — waiting for LQDTY entry signal.")
 

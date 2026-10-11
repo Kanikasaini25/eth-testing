@@ -50,6 +50,11 @@ def generate_report(
     lines.extend(["", "## Backtest Mode", ""])
     for result in results:
         lines.append(f"- **{result.rule_name}:** `{result.backtest_mode}`")
+        if result.skipped_unconfirmed:
+            lines.append(
+                f"  - Signals skipped (stop hit before profit confirmation): "
+                f"{result.skipped_unconfirmed}"
+            )
 
     if any(result.rule_compliance for result in results):
         lines.extend(["", "## Rule Compliance Check", ""])
